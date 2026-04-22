@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+from src.handlers.common import ensure_authorized, expires_at_from_duration, owner_only, parse_duration
+from src.services.scheduler_service import daily_to_cron
+from src.storage.db import Database
+
+from telegram import Update
+from telegram.ext import ContextTypes
+
+
+@owner_only
+async def add_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) < 2:
+        await update.effective_message.reply_text("Usage: /adduser <telegram_user_id> <duration e.g. 7d or 12h>")
+        return
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    try:
+        user_id = int(context.args[0])
+        duration = parse_duration(context.args[1])
+    except ValueError as exc:
+        await update.effective_message.reply_text(f"Invalid input: {exc}")
+        return
+    username = context.args[2] if len(context.args) > 2 else None
+    expires_at = expires_at_from_duration(duration)
+    db.add_or_extend_user(user_id, username, expires_at, actor_id)
+    db.add_audit_log(actor_id, "add_user", f"user_id={user_id}, expires_at={expires_at.isoformat()}")
+    await update.effective_message.reply_text(f"User {user_id} authorized until {expires_at.isoformat()}.")
+
+
+@owner_only
+async def remove_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /removeuser <telegram_user_id>")
+        return
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    try:
+        user_id = int(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("telegram_user_id must be an integer.")
+        return
+    db.remove_user(user_id)
+    db.add_audit_log(actor_id, "remove_user", f"user_id={user_id}")
+    await update.effective_message.reply_text(f"User {user_id} removed from authorized users.")
+
+
+@owner_only
+async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: Database = context.application.bot_data["db"]
+    users = db.list_authorized_users()
+    if not users:
+        await update.effective_message.reply_text("No authorized users currently.")
+        return
+    lines = ["Authorized users:"]
+    for u in users:
+        lines.append(f"- {u.telegram_user_id} ({u.username or 'no username'}) expires {u.expires_at.isoformat()}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+@owner_only
+async def set_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if len(context.args) != 5:
+        await update.effective_message.reply_text("Usage: /setschedule <min> <hour> <day> <month> <dow>")
+        return
+    scheduler = context.application.bot_data["scheduler"]
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    cron_expr = " ".join(context.args)
+    try:
+        scheduler.set_schedule(cron_expr)
+    except ValueError as exc:
+        await update.effective_message.reply_text(f"Invalid cron: {exc}")
+        return
+    db.add_audit_log(actor_id, "set_schedule", cron_expr)
+    await update.effective_message.reply_text(f"Global schedule set to `{cron_expr}`.", parse_mode="Markdown")
+
+
+@owner_only
+async def set_daily(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /setdaily <HH:MM>")
+        return
+    scheduler = context.application.bot_data["scheduler"]
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    try:
+        cron_expr = daily_to_cron(context.args[0])
+        scheduler.set_schedule(cron_expr)
+    except ValueError as exc:
+        await update.effective_message.reply_text(f"Invalid time: {exc}")
+        return
+    db.add_audit_log(actor_id, "set_daily", cron_expr)
+    await update.effective_message.reply_text(f"Daily global news schedule set to `{context.args[0]}` UTC.", parse_mode="Markdown")
+
+
+@owner_only
+async def schedule_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    scheduler = context.application.bot_data["scheduler"]
+    expr, paused = scheduler.get_schedule()
+    if not expr:
+        await update.effective_message.reply_text("No schedule configured.")
+        return
+    await update.effective_message.reply_text(f"Cron: `{expr}` | paused: `{paused}`", parse_mode="Markdown")
+
+
+@owner_only
+async def pause_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    scheduler = context.application.bot_data["scheduler"]
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    scheduler.pause_schedule()
+    db.add_audit_log(actor_id, "pause_schedule")
+    await update.effective_message.reply_text("Global schedule paused.")
+
+
+@owner_only
+async def resume_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    scheduler = context.application.bot_data["scheduler"]
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    scheduler.resume_schedule()
+    db.add_audit_log(actor_id, "resume_schedule")
+    await update.effective_message.reply_text("Global schedule resumed.")
+
+
+@owner_only
+async def broadcast_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authorized(update, context):
+        return
+    scheduler = context.application.bot_data["scheduler"]
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    await scheduler.trigger_now()
+    db.add_audit_log(actor_id, "broadcast_now")
+    await update.effective_message.reply_text("Manual broadcast triggered.")
