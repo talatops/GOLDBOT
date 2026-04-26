@@ -91,8 +91,6 @@ def build_application() -> Application:
             f"Source: {price['source']}\n"
             f"<a href=\"https://www.tradingview.com/chart/?symbol=TVC%3AGOLD\">Open TradingView GOLD Chart</a>"
         )
-        if str(price.get("fallback_active", "false")).lower() == "true":
-            price_html += "\n<b>Note</b>: fallback source active"
         final_message = f"{price_html}\n\n{_to_html_sections(curated)}\n\n{sources_html}"
         headline_message = _to_html_headlines(headline_text)
         recipients = {settings.bot_owner_id}
@@ -209,15 +207,24 @@ def _to_html_sections(text: str) -> str:
         if "bull" in text_blob.lower() or "buy" in text_blob.lower():
             signal = "BUY"
             confidence = "Medium"
-            reason = "Positive momentum signals are currently stronger than bearish cues."
+            reason = (
+                "Price action and headline tone currently favor upside bias; monitor US yield moves and any "
+                "fresh geopolitical headlines because a sharp rise in real yields can quickly invalidate this setup."
+            )
         elif "bear" in text_blob.lower() or "sell" in text_blob.lower():
             signal = "SELL"
             confidence = "Medium"
-            reason = "Downside risk factors currently outweigh bullish momentum cues."
+            reason = (
+                "Recent flows suggest near-term downside pressure in gold; watch for hawkish policy surprises or "
+                "USD strength continuation, as either can sustain selling until risk sentiment shifts."
+            )
         else:
             signal = "HOLD"
             confidence = "Low"
-            reason = "Mixed signals with no clear directional edge from current inputs."
+            reason = (
+                "Current inputs are mixed, so directional edge is limited; wait for confirmation from a clean "
+                "break in trend, stronger macro catalyst, or a decisive move in yields before taking size."
+            )
 
     return (
         "<b>Trade Signal</b>\n"

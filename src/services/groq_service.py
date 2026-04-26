@@ -102,8 +102,8 @@ class GroqService:
             "You are a professional gold market analyst. "
             "Write a concise actionable brief for traders based on provided headlines and live price snapshot. "
             "Output exactly these fields and nothing else: "
-            "Signal: BUY/SELL/HOLD, Confidence: High/Medium/Low, Reason: short explanation. "
-            "Keep total response under 85 words. "
+            "Signal: BUY/SELL/HOLD, Confidence: High/Medium/Low, Reason: detailed explanation. "
+            "Keep total response between 55 and 110 words. "
             "Reason MUST be concrete and include exactly 3 parts in one sentence: "
             "(1) current price action with number, (2) dominant catalyst from the provided headlines, "
             "(3) a clear trigger level/event to change stance. "
@@ -154,12 +154,12 @@ class GroqService:
             return "Top Headlines:\n- AI unavailable (missing API key)."
 
         system_prompt = (
-            "You are a gold macro news editor. "
-            "Create exactly 3 dynamic market-pulse bullets from context. "
+            "You are a gold news editor writing for everyday traders in plain English. "
+            "Create exactly 3 clear headline bullets from context. "
             "Do not copy source headlines verbatim. "
-            "Each bullet must highlight a different angle: (1) price action, (2) macro/rates catalyst, (3) risk trigger to watch. "
-            "Each bullet must include: what happened, why it matters for gold, and what to monitor next. "
-            "Keep each bullet between 18 and 28 words. "
+            "Each bullet must highlight a different angle: (1) what price did, (2) why it moved, (3) what to watch next. "
+            "Use simple wording and avoid jargon terms like 'bid absorption', 'forced sales', or 'real-yield headwinds'. "
+            "Keep each bullet between 16 and 24 words. "
             "Output plain text only; one line per bullet; each line starts with '- '."
         )
         model = await self._resolve_model()
