@@ -34,6 +34,7 @@ async def register_commands(app: Application) -> None:
         BotCommand("help", "Show help and command list"),
         BotCommand("myid", "Show your Telegram user ID"),
         BotCommand("news", "Get latest gold market brief"),
+        BotCommand("headline", "Get top 3 headlines"),
         BotCommand("ask", "Ask a custom market question"),
         BotCommand("addsite", "Add custom RSS/news website"),
         BotCommand("removesite", "Remove custom website"),
@@ -46,7 +47,6 @@ async def register_commands(app: Application) -> None:
         BotCommand("schedule", "Owner: show schedule status"),
         BotCommand("pauseschedule", "Owner: pause scheduled sends"),
         BotCommand("resumeschedule", "Owner: resume scheduled sends"),
-        BotCommand("broadcastnow", "Owner: send broadcast now"),
     ]
     try:
         await app.bot.set_my_commands(commands)
@@ -79,6 +79,8 @@ def build_application() -> Application:
         await news_service.fetch_and_cache_market_snapshot()
         top_news = await news_service.get_top_news(limit=5)
         price = await news_service.get_live_price_snapshot()
+        headline_context = await news_service.build_headline_context()
+        headline_text = await groq_service.curate_headlines(headline_context=headline_context)
         market_context = await news_service.build_market_context()
         curated = await groq_service.curate_news_update(market_context=market_context)
         sources_html = news_service.build_sources_html(top_news)
@@ -92,10 +94,17 @@ def build_application() -> Application:
         if str(price.get("fallback_active", "false")).lower() == "true":
             price_html += "\n<b>Note</b>: fallback source active"
         final_message = f"{price_html}\n\n{_to_html_sections(curated)}\n\n{sources_html}"
+        headline_message = _to_html_headlines(headline_text)
         recipients = {settings.bot_owner_id}
         recipients.update(user.telegram_user_id for user in db.list_authorized_users())
         for chat_id in recipients:
             try:
+                await app.bot.send_message(
+                    chat_id=chat_id,
+                    text=headline_message,
+                    disable_web_page_preview=True,
+                    parse_mode="HTML",
+                )
                 await app.bot.send_message(
                     chat_id=chat_id,
                     text=final_message,
@@ -111,6 +120,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", user_handlers.start))
     app.add_handler(CommandHandler("help", user_handlers.help_command))
     app.add_handler(CommandHandler("myid", user_handlers.my_id))
+    app.add_handler(CommandHandler("headline", user_handlers.headline))
     app.add_handler(CommandHandler("news", user_handlers.news))
     app.add_handler(CommandHandler("ask", user_handlers.ask))
     app.add_handler(CommandHandler("addsite", user_handlers.add_site))
@@ -126,7 +136,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("schedule", admin_handlers.schedule_status))
     app.add_handler(CommandHandler("pauseschedule", admin_handlers.pause_schedule))
     app.add_handler(CommandHandler("resumeschedule", admin_handlers.resume_schedule))
-    app.add_handler(CommandHandler("broadcastnow", admin_handlers.broadcast_now))
     app.add_error_handler(on_error)
 
     return app
@@ -187,6 +196,14 @@ def _to_html_sections(text: str) -> str:
             reason = raw.split(":", 1)[1].strip()
             continue
 
+    # Recovery path for malformed AI output: infer from free-text lines.
+    if not reason:
+        free_text = " ".join(
+            line for line in lines if not line.lower().startswith(("signal:", "confidence:", "reason:"))
+        ).strip()
+        if free_text:
+            reason = free_text
+
     if not reason:
         text_blob = " ".join(lines)
         if "bull" in text_blob.lower() or "buy" in text_blob.lower():
@@ -208,6 +225,27 @@ def _to_html_sections(text: str) -> str:
         f"<b>Confidence</b>: {escape(confidence)}\n"
         f"<b>Reason</b>: {escape(reason)}"
     )
+
+
+def _to_html_headlines(text: str) -> str:
+    from html import escape
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullets: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        clean = line.replace("**", "").replace("__", "").strip()
+        payload = clean.lstrip("-• ").strip()
+        if not payload:
+            continue
+        key = " ".join(payload.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        bullets.append(f"• {escape(payload)}")
+    if not bullets:
+        bullets = ["• Headlines unavailable."]
+    return "<b>Top Headlines</b>\n" + "\n".join(bullets[:3])
 
 
 if __name__ == "__main__":

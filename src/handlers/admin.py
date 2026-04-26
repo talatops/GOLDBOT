@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.handlers.common import ensure_authorized, expires_at_from_duration, owner_only, parse_duration
+from src.handlers.common import expires_at_from_duration, owner_only, parse_duration
 from src.services.scheduler_service import daily_to_cron
 from src.storage.db import Database
 
@@ -124,13 +124,3 @@ async def resume_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text("Global schedule resumed.")
 
 
-@owner_only
-async def broadcast_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not await ensure_authorized(update, context):
-        return
-    scheduler = context.application.bot_data["scheduler"]
-    db: Database = context.application.bot_data["db"]
-    actor_id = update.effective_user.id
-    await scheduler.trigger_now()
-    db.add_audit_log(actor_id, "broadcast_now")
-    await update.effective_message.reply_text("Manual broadcast triggered.")

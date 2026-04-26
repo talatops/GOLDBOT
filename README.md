@@ -72,9 +72,9 @@ No separate gold price API key is required in this mode.
 - `/schedule`
 - `/pauseschedule`
 - `/resumeschedule`
-- `/broadcastnow`
 
 ### Authorized users
+- `/headline`
 - `/news`
 - `/ask <question>`
 - `/addsite <url> [name]`
@@ -101,3 +101,11 @@ No separate gold price API key is required in this mode.
 ## Notes
 - This bot provides informational summaries only, not financial advice.
 - Keep `.env` secret and never commit real keys/tokens.
+
+## VPS Quick Deploy
+- Make script executable once:
+  - `chmod +x deploy.sh`
+- Deploy latest `main` branch and restart service:
+  - `./deploy.sh`
+- Deploy another branch:
+  - `./deploy.sh master`

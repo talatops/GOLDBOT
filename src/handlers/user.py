@@ -26,6 +26,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/help - This help\n"
         "/myid - Show your Telegram user ID\n"
         "/news - Latest gold digest\n"
+        "/headline - Top 3 improved headlines\n"
         "/ask <question> - Ask a custom market question\n\n"
         "/addsite <url> [name] - Add your custom RSS/news site\n"
         "/removesite <url> - Remove your custom site\n"
@@ -38,8 +39,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setdaily <HH:MM>\n"
         "/schedule\n"
         "/pauseschedule\n"
-        "/resumeschedule\n"
-        "/broadcastnow"
+        "/resumeschedule"
     )
     await update.effective_message.reply_text(text)
 
@@ -76,6 +76,22 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     final_message = f"{price_html}\n\n{formatted_curated}\n\n{sources_html}"
     await update.effective_message.reply_text(
         final_message,
+        disable_web_page_preview=True,
+        parse_mode="HTML",
+    )
+
+
+async def headline(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await ensure_authorized(update, context):
+        return
+    user = update.effective_user
+    news_service: NewsService = context.application.bot_data["news_service"]
+    groq_service: GroqService = context.application.bot_data["groq_service"]
+    await news_service.fetch_and_cache_market_snapshot(owner_user_id=user.id if user else None)
+    headline_context = await news_service.build_headline_context(owner_user_id=user.id if user else None)
+    improved = await groq_service.curate_headlines(headline_context=headline_context)
+    await update.effective_message.reply_text(
+        _to_html_headline(improved),
         disable_web_page_preview=True,
         parse_mode="HTML",
     )
@@ -194,6 +210,14 @@ def _to_html_sections(text: str) -> str:
             reason = raw.split(":", 1)[1].strip()
             continue
 
+    # Recovery path for malformed AI output: infer from free-text lines.
+    if not reason:
+        free_text = " ".join(
+            line for line in lines if not line.lower().startswith(("signal:", "confidence:", "reason:"))
+        ).strip()
+        if free_text:
+            reason = free_text
+
     if not reason:
         text_blob = " ".join(lines)
         if "bull" in text_blob.lower() or "buy" in text_blob.lower():
@@ -222,3 +246,22 @@ def _to_html_answer(text: str) -> str:
     if not lines:
         return "<b>Answer</b>\nNo result."
     return "<b>Answer</b>\n" + "\n".join(escape(line.replace("**", "").replace("__", "")) for line in lines)
+
+
+def _to_html_headline(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    bullets = []
+    seen: set[str] = set()
+    for line in lines:
+        clean = line.replace("**", "").replace("__", "").strip()
+        payload = clean.lstrip("-• ").strip()
+        if not payload:
+            continue
+        key = " ".join(payload.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        bullets.append(f"• {escape(payload)}")
+    if not bullets:
+        bullets = ["• Headlines unavailable."]
+    return "<b>Top Headlines</b>\n" + "\n".join(bullets[:3])

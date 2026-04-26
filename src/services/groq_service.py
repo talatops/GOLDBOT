@@ -103,9 +103,11 @@ class GroqService:
             "Write a concise actionable brief for traders based on provided headlines and live price snapshot. "
             "Output exactly these fields and nothing else: "
             "Signal: BUY/SELL/HOLD, Confidence: High/Medium/Low, Reason: short explanation. "
-            "Keep total response under 70 words. "
+            "Keep total response under 85 words. "
             "Reason MUST be concrete and include exactly 3 parts in one sentence: "
-            "(1) current price action, (2) dominant catalyst from sources, (3) clear trigger to change stance."
+            "(1) current price action with number, (2) dominant catalyst from the provided headlines, "
+            "(3) a clear trigger level/event to change stance. "
+            "Never use generic placeholders like 'mixed signals' or 'no clear trigger'."
         )
         model = await self._resolve_model()
         payload = {
@@ -118,7 +120,10 @@ class GroqService:
                     "content": (
                         "Create a clean Telegram-ready gold market brief in HTML-friendly plain text from this context:\n\n"
                         f"{market_context}\n\n"
-                        "Do not use vague phrases like 'no clear trigger' without naming what trigger to watch."
+                        "Use this strict shape:\n"
+                        "Signal: <BUY|SELL|HOLD>\n"
+                        "Confidence: <High|Medium|Low>\n"
+                        "Reason: <one sentence with 3 concrete parts>."
                     ),
                 },
             ],
@@ -143,6 +148,36 @@ class GroqService:
                 "I could not curate the market update right now. "
                 "Showing raw website headlines instead."
             )
+
+    async def curate_headlines(self, headline_context: str) -> str:
+        if not self._api_key and not self._openrouter_api_key:
+            return "Top Headlines:\n- AI unavailable (missing API key)."
+
+        system_prompt = (
+            "You are a gold macro news editor. "
+            "Create exactly 3 dynamic market-pulse bullets from context. "
+            "Do not copy source headlines verbatim. "
+            "Each bullet must highlight a different angle: (1) price action, (2) macro/rates catalyst, (3) risk trigger to watch. "
+            "Each bullet must include: what happened, why it matters for gold, and what to monitor next. "
+            "Keep each bullet between 18 and 28 words. "
+            "Output plain text only; one line per bullet; each line starts with '- '."
+        )
+        model = await self._resolve_model()
+        payload = {
+            "model": model,
+            "temperature": 0.4,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": headline_context},
+            ],
+        }
+        headers = self._headers()
+        try:
+            data = await self._send_chat(payload=payload, headers=headers)
+            content = str(data["choices"][0]["message"]["content"]).strip()
+            return content
+        except Exception:
+            return "Top Headlines:\n- Headline curation unavailable right now."
 
     def _headers(self) -> dict[str, str]:
         if self._openrouter_api_key:

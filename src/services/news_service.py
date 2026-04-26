@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from datetime import timezone
+from datetime import datetime
 from email.utils import parsedate_to_datetime
+from difflib import SequenceMatcher
 
 import feedparser
 import httpx
@@ -11,10 +14,16 @@ import httpx
 from src.storage.db import Database
 
 NEWS_SOURCES: list[tuple[str, str]] = [
-    ("ReutersBusiness", "https://feeds.reuters.com/reuters/businessNews"),
+    ("FXStreetNews", "https://www.fxstreet.com/rss/news"),
     ("InvestingCommodities", "https://www.investing.com/rss/news_25.rss"),
-    ("MiningDotCom", "https://www.mining.com/feed/"),
+    ("InvestingMetals", "https://www.investing.com/rss/news_301.rss"),
 ]
+
+SOURCE_BASE_SCORES: dict[str, int] = {
+    "FXStreetNews": 92,
+    "InvestingCommodities": 84,
+    "InvestingMetals": 80,
+}
 
 REFERENCE_LINKS: list[tuple[str, str]] = [
     ("TradingView GOLD Chart", "https://www.tradingview.com/chart/?symbol=TVC%3AGOLD"),
@@ -24,6 +33,9 @@ REFERENCE_LINKS: list[tuple[str, str]] = [
 class NewsService:
     def __init__(self, db: Database) -> None:
         self._db = db
+        self._source_fail_counts: dict[str, int] = {}
+        self._source_muted_until: dict[str, float] = {}
+        self._last_source_health: dict[str, dict[str, str | int]] = {}
 
     async def fetch_and_cache_market_snapshot(
         self, owner_user_id: int | None = None
@@ -37,10 +49,29 @@ class NewsService:
         news = self._db.get_recent_news(limit=limit * 2)
         if not news:
             news = await self.fetch_and_cache_market_snapshot(owner_user_id=owner_user_id)
-        return news[:limit]
+        ranked = sorted(news, key=lambda x: _to_float(x.get("quality_score")) or 0, reverse=True)
+        deduped: list[dict[str, str | None]] = []
+        seen_url: set[str] = set()
+        seen_title: set[str] = set()
+        for item in ranked:
+            url = str(item.get("url") or "").strip()
+            title = str(item.get("title") or "").strip()
+            title_key = _normalize_title(title)
+            if url and url in seen_url:
+                continue
+            if title_key and (title_key in seen_title or any(_is_similar_title(title, d.get("title")) for d in deduped)):
+                continue
+            if url:
+                seen_url.add(url)
+            if title_key:
+                seen_title.add(title_key)
+            deduped.append(item)
+            if len(deduped) >= limit:
+                break
+        return deduped[:limit]
 
     async def build_market_context(self, owner_user_id: int | None = None) -> str:
-        news = await self.get_top_news(owner_user_id=owner_user_id, limit=5)
+        news = await self.get_top_news(owner_user_id=owner_user_id, limit=3)
         price = await self.get_live_price_snapshot()
         price_line = (
             f"Live gold price snapshot: XAUUSD={price['price']} | change={price['change']} | "
@@ -48,24 +79,52 @@ class NewsService:
         )
         if not news:
             return f"{price_line}\nNo fresh gold headlines found."
-        lines = [price_line, "Latest gold-related headlines from monitored websites:"]
+        lines = [price_line, "Top 3 fresh gold headlines (with source confidence):"]
         for idx, item in enumerate(news, start=1):
             title = str(item.get("title") or "Untitled")
             source = str(item.get("source") or "Source")
             url = str(item.get("url") or "")
-            lines.append(f"{idx}. {title} | source={source} | url={url}")
+            conf = str(item.get("source_confidence") or "n/a")
+            lines.append(f"{idx}. {title} | source={source} | confidence={conf} | url={url}")
+        return "\n".join(lines)
+
+    async def build_headline_context(self, owner_user_id: int | None = None) -> str:
+        news = await self.get_top_news(owner_user_id=owner_user_id, limit=6)
+        price = await self.get_live_price_snapshot()
+        if not news:
+            return "No fresh gold headlines available."
+        lines = [
+            (
+                f"Price snapshot: XAUUSD={price['price']} | change={price['change']} | "
+                f"change_percent={price['change_percent']} | source={price['source']}"
+            ),
+            "Candidate headlines ranked by quality:",
+        ]
+        for idx, item in enumerate(news, start=1):
+            lines.append(
+                f"{idx}. {item.get('title', 'Untitled')} | source={item.get('source', 'Source')} "
+                f"| confidence={item.get('source_confidence', 'n/a')}"
+            )
         return "\n".join(lines)
 
     def build_sources_html(self, news_items: list[dict[str, str | None]]) -> str:
         if not news_items and not REFERENCE_LINKS:
             return "<b>Sources</b>\nNo links available."
         lines = ["<b>Sources</b>"]
+        seen_url: set[str] = set()
+        seen_title: set[str] = set()
         for item in news_items:
             title = _escape_html(str(item.get("title") or "Untitled"))
             source = _escape_html(str(item.get("source") or "Source"))
             url = str(item.get("url") or "").strip()
             if not url:
                 continue
+            title_key = _normalize_title(str(item.get("title") or ""))
+            if url in seen_url or (title_key and title_key in seen_title):
+                continue
+            seen_url.add(url)
+            if title_key:
+                seen_title.add(title_key)
             lines.append(f"- <a href=\"{url}\">{title}</a> ({source})")
         if REFERENCE_LINKS:
             lines.append("")
@@ -147,28 +206,50 @@ class NewsService:
             if source_url:
                 dynamic_sources.append((source_name, source_url))
 
+        now = time.time()
+        active_sources = [
+            (source, url)
+            for source, url in dynamic_sources
+            if self._source_muted_until.get(source, 0) <= now
+        ]
+
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            tasks = [self._fetch_source(client, source, url) for source, url in dynamic_sources]
+            tasks = [self._fetch_source(client, source, url) for source, url in active_sources]
             results = await asyncio.gather(*tasks, return_exceptions=True)
         merged: list[dict[str, str | None]] = []
-        for chunk in results:
+        for i, chunk in enumerate(results):
+            source_name = active_sources[i][0]
             if isinstance(chunk, Exception):
+                self._mark_source_failure(source_name, str(chunk))
                 continue
+            self._mark_source_success(source_name, len(chunk))
             merged.extend(chunk)
 
         # Deduplicate by URL and keep latest first.
         seen_url: set[str] = set()
         seen_title: set[str] = set()
         deduped: list[dict[str, str | None]] = []
-        for item in sorted(merged, key=lambda i: i.get("published_at") or "", reverse=True):
+        filtered = [item for item in merged if _is_fresh(item.get("published_at"))]
+        for item in sorted(filtered, key=lambda i: i.get("published_at") or "", reverse=True):
             url = item.get("url") or ""
             raw_title = str(item.get("title") or "")
             title_key = _normalize_title(raw_title)
             if not url or url in seen_url or (title_key and title_key in seen_title):
                 continue
+            if any(_is_similar_title(raw_title, existing.get("title")) for existing in deduped):
+                continue
             seen_url.add(url)
             if title_key:
                 seen_title.add(title_key)
+            source_name = str(item.get("source") or "Unknown")
+            item["source_confidence"] = str(self._source_confidence(source_name))
+            item["quality_score"] = str(
+                _quality_score(
+                    title=raw_title,
+                    published_at=item.get("published_at"),
+                    source_confidence=self._source_confidence(source_name),
+                )
+            )
             deduped.append(item)
         return deduped[:20]
 
@@ -186,9 +267,11 @@ class NewsService:
                 )
                 title = (getattr(entry, "title", "") or "").strip()
                 link = (getattr(entry, "link", "") or "").strip()
+                summary = (getattr(entry, "summary", "") or "").strip()
                 if not title or not link:
                     continue
-                if "gold" not in title.lower() and "bullion" not in title.lower():
+                text_blob = f"{title} {summary}".lower()
+                if not any(token in text_blob for token in ("gold", "xau", "bullion", "precious metal")):
                     continue
                 items.append(
                     {
@@ -216,6 +299,42 @@ class NewsService:
                 }
             )
         return items
+
+    def source_health_snapshot(self) -> list[dict[str, str | int]]:
+        return [
+            {
+                "source": source,
+                "failures": meta.get("failures", 0),
+                "last_status": meta.get("last_status", "unknown"),
+                "last_items": meta.get("last_items", 0),
+                "muted": "true" if self._source_muted_until.get(source, 0) > time.time() else "false",
+            }
+            for source, meta in sorted(self._last_source_health.items(), key=lambda kv: kv[0])
+        ]
+
+    def _mark_source_success(self, source: str, item_count: int) -> None:
+        self._source_fail_counts[source] = 0
+        self._last_source_health[source] = {
+            "failures": 0,
+            "last_status": "ok",
+            "last_items": item_count,
+        }
+
+    def _mark_source_failure(self, source: str, _error: str) -> None:
+        failures = self._source_fail_counts.get(source, 0) + 1
+        self._source_fail_counts[source] = failures
+        self._last_source_health[source] = {
+            "failures": failures,
+            "last_status": "failed",
+            "last_items": 0,
+        }
+        if failures >= 3:
+            self._source_muted_until[source] = time.time() + 600
+
+    def _source_confidence(self, source: str) -> int:
+        base = SOURCE_BASE_SCORES.get(source, 60)
+        fail_penalty = min(30, self._source_fail_counts.get(source, 0) * 10)
+        return max(30, base - fail_penalty)
 
     async def build_question_context(self, owner_user_id: int | None, question: str) -> str:
         base_context = await self.build_market_context(owner_user_id=owner_user_id)
@@ -321,12 +440,34 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 
+def _is_similar_title(title_a: str | None, title_b: str | None) -> bool:
+    if not title_a or not title_b:
+        return False
+    a = _normalize_title(title_a)
+    b = _normalize_title(title_b)
+    if not a or not b:
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= 0.88
+
+
 def _extract_text(html: str) -> str:
     cleaned = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
     cleaned = re.sub(r"(?is)<style.*?>.*?</style>", " ", cleaned)
     cleaned = re.sub(r"(?is)<[^>]+>", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
+
+
+def _is_fresh(published_at: str | None, max_age_hours: int = 72) -> bool:
+    if not published_at:
+        return True
+    try:
+        dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        age_hours = (now - dt.astimezone(timezone.utc)).total_seconds() / 3600
+        return age_hours <= max_age_hours
+    except Exception:
+        return True
 
 
 def _contains_gold_terms(text: str) -> bool:
@@ -344,6 +485,20 @@ def _extract_query_terms(question: str) -> list[str]:
         if token not in uniq:
             uniq.append(token)
     return uniq[:6]
+
+
+def _quality_score(title: str, published_at: str | None, source_confidence: int) -> int:
+    score = source_confidence
+    lower = title.lower()
+    boost_terms = ("gold", "xau", "bullion", "spot", "fed", "rates", "yield")
+    for term in boost_terms:
+        if term in lower:
+            score += 3
+    if _is_fresh(published_at, max_age_hours=24):
+        score += 10
+    elif _is_fresh(published_at, max_age_hours=48):
+        score += 4
+    return min(100, score)
 
 
 def _match_lines(text: str, terms: list[str]) -> list[str]:
