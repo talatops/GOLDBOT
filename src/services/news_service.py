@@ -19,6 +19,12 @@ NEWS_SOURCES: list[tuple[str, str]] = [
     ("InvestingMetals", "https://www.investing.com/rss/news_301.rss"),
 ]
 
+SOURCE_FALLBACK_LINKS: dict[str, str] = {
+    "FXStreetNews": "https://www.fxstreet.com/news",
+    "InvestingCommodities": "https://www.investing.com/commodities/",
+    "InvestingMetals": "https://www.investing.com/news/commodities-news",
+}
+
 SOURCE_BASE_SCORES: dict[str, int] = {
     "FXStreetNews": 92,
     "InvestingCommodities": 84,
@@ -113,6 +119,7 @@ class NewsService:
         lines = ["<b>Sources</b>"]
         seen_url: set[str] = set()
         seen_title: set[str] = set()
+        added_any = False
         for item in news_items:
             title = _escape_html(str(item.get("title") or "Untitled"))
             source = _escape_html(str(item.get("source") or "Source"))
@@ -126,6 +133,12 @@ class NewsService:
             if title_key:
                 seen_title.add(title_key)
             lines.append(f"- <a href=\"{url}\">{title}</a> ({source})")
+            added_any = True
+        if not added_any:
+            lines.append("- No fresh article links found; showing tracked source pages:")
+            for source_name, source_url in NEWS_SOURCES:
+                fallback_url = SOURCE_FALLBACK_LINKS.get(source_name, source_url)
+                lines.append(f"- <a href=\"{fallback_url}\">{_escape_html(source_name)}</a>")
         if REFERENCE_LINKS:
             lines.append("")
             lines.append("<b>Market References</b>")
