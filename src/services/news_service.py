@@ -135,7 +135,6 @@ class NewsService:
             lines.append(f"- <a href=\"{url}\">{title}</a> ({source})")
             added_any = True
         if not added_any:
-            lines.append("- No fresh article links found; showing tracked source pages:")
             for source_name, source_url in NEWS_SOURCES:
                 fallback_url = SOURCE_FALLBACK_LINKS.get(source_name, source_url)
                 lines.append(f"- <a href=\"{fallback_url}\">{_escape_html(source_name)}</a>")
