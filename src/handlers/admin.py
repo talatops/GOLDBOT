@@ -124,3 +124,71 @@ async def resume_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await update.effective_message.reply_text("Global schedule resumed.")
 
 
+@owner_only
+async def add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /addchannel <channel_id> [channel_name]")
+        return
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    try:
+        channel_id = int(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("channel_id must be an integer (usually starts with -100).")
+        return
+    channel_name = " ".join(context.args[1:]).strip() if len(context.args) > 1 else None
+    db.add_broadcast_channel(channel_id=channel_id, channel_name=channel_name, added_by=actor_id)
+    db.add_audit_log(actor_id, "add_channel", f"channel_id={channel_id}")
+    await update.effective_message.reply_text(
+        "Channel saved. Make sure this bot is added to that channel as an admin to send scheduled updates."
+    )
+
+
+@owner_only
+async def remove_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /removechannel <channel_id>")
+        return
+    db: Database = context.application.bot_data["db"]
+    actor_id = update.effective_user.id
+    try:
+        channel_id = int(context.args[0])
+    except ValueError:
+        await update.effective_message.reply_text("channel_id must be an integer (usually starts with -100).")
+        return
+    removed = db.remove_broadcast_channel(channel_id=channel_id)
+    if not removed:
+        await update.effective_message.reply_text("Channel was not in broadcast list.")
+        return
+    db.add_audit_log(actor_id, "remove_channel", f"channel_id={channel_id}")
+    await update.effective_message.reply_text(f"Channel {channel_id} removed from scheduled broadcast.")
+
+
+@owner_only
+async def list_channels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: Database = context.application.bot_data["db"]
+    channels = db.list_broadcast_channels()
+    if not channels:
+        await update.effective_message.reply_text("No broadcast channels configured yet.")
+        return
+    lines = ["Broadcast channels:"]
+    for row in channels:
+        cid = row.get("channel_id")
+        cname = row.get("channel_name") or "no name"
+        lines.append(f"- {cid} ({cname})")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+@owner_only
+async def send_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    callback = context.application.bot_data.get("broadcast_callback")
+    if callback is None:
+        await update.effective_message.reply_text("Broadcast callback is not ready yet. Try again in a few seconds.")
+        return
+    await update.effective_message.reply_text("Running test broadcast now...")
+    try:
+        await callback(force_send=True)
+    except TypeError:
+        await callback()
+    await update.effective_message.reply_text("Test broadcast sent to owner, authorized users, and configured channels.")
+

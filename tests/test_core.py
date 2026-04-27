@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from src.bot import _extract_signal_confidence, _should_trigger_signal_alert
 from src.handlers.common import parse_duration
 from src.services.scheduler_service import cron_trigger_from_expression, daily_to_cron
 from src.storage.db import Database
@@ -60,3 +61,55 @@ def test_custom_sources_lifecycle(tmp_path: Path) -> None:
     assert removed is True
     mine_after = db.list_custom_sources(owner_user_id=101)
     assert len(mine_after) == 1
+
+
+def test_broadcast_channels_lifecycle(tmp_path: Path) -> None:
+    db = Database(tmp_path / "channels.db")
+    db.add_broadcast_channel(channel_id=-1001234567890, added_by=999, channel_name="Gold Alerts")
+    db.add_broadcast_channel(channel_id=-1009876543210, added_by=999, channel_name=None)
+    channels = db.list_broadcast_channels()
+    assert len(channels) == 2
+    assert any(int(item["channel_id"]) == -1001234567890 for item in channels)
+
+    removed = db.remove_broadcast_channel(channel_id=-1001234567890)
+    assert removed is True
+    channels_after = db.list_broadcast_channels()
+    assert len(channels_after) == 1
+
+
+def test_alert_state_and_broadcast_checkpoint(tmp_path: Path) -> None:
+    db = Database(tmp_path / "alerts.db")
+    db.set_last_broadcast_at("2026-01-01T00:00:00+00:00")
+    assert db.get_last_broadcast_at() == "2026-01-01T00:00:00+00:00"
+
+    db.set_last_alert_state(
+        signal_hash="abc123",
+        signal="BUY",
+        confidence="High",
+        sent_at="2026-01-01T00:10:00+00:00",
+    )
+    state = db.get_last_alert_state()
+    assert state["hash"] == "abc123"
+    assert state["signal"] == "BUY"
+    assert state["confidence"] == "High"
+    assert state["sent_at"] == "2026-01-01T00:10:00+00:00"
+
+
+def test_signal_trigger_policy() -> None:
+    assert _should_trigger_signal_alert("BUY", "High") is True
+    assert _should_trigger_signal_alert("SELL", "Low") is True
+    assert _should_trigger_signal_alert("SELL", "Medium") is True
+    assert _should_trigger_signal_alert("SELL", "High") is False
+    assert _should_trigger_signal_alert("BUY", "Medium") is False
+    assert _should_trigger_signal_alert("HOLD", "High") is False
+
+
+def test_extract_signal_confidence_from_curated_text() -> None:
+    text = (
+        "Signal: SELL\n"
+        "Confidence: Medium\n"
+        "Reason: US yields are rising and risk appetite improved."
+    )
+    signal, confidence = _extract_signal_confidence(text)
+    assert signal == "SELL"
+    assert confidence == "Medium"

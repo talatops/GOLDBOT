@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
 import logging
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update
 from telegram import BotCommand
@@ -20,6 +23,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+WATCH_INTERVAL = timedelta(minutes=10)
+ALERT_COOLDOWN = timedelta(hours=2)
 
 async def on_error(update: object, context) -> None:
     update_id = None
@@ -47,6 +52,10 @@ async def register_commands(app: Application) -> None:
         BotCommand("schedule", "Owner: show schedule status"),
         BotCommand("pauseschedule", "Owner: pause scheduled sends"),
         BotCommand("resumeschedule", "Owner: resume scheduled sends"),
+        BotCommand("addchannel", "Owner: add channel for scheduled broadcasts"),
+        BotCommand("removechannel", "Owner: remove channel from broadcasts"),
+        BotCommand("listchannels", "Owner: list configured broadcast channels"),
+        BotCommand("sendtest", "Owner: send test broadcast immediately"),
     ]
     try:
         await app.bot.set_my_commands(commands)
@@ -74,7 +83,7 @@ def build_application() -> Application:
     app.bot_data["groq_service"] = groq_service
     app.bot_data["scheduler"] = scheduler
 
-    async def broadcast_news() -> None:
+    async def broadcast_news(force_send: bool = False) -> None:
         db.purge_expired_users()
         await news_service.fetch_and_cache_market_snapshot()
         top_news = await news_service.get_top_news(limit=5)
@@ -95,6 +104,8 @@ def build_application() -> Application:
         headline_message = _to_html_headlines(headline_text)
         recipients = {settings.bot_owner_id}
         recipients.update(user.telegram_user_id for user in db.list_authorized_users())
+        recipients.update(int(item["channel_id"]) for item in db.list_broadcast_channels())
+        sent_count = 0
         for chat_id in recipients:
             try:
                 await app.bot.send_message(
@@ -109,10 +120,16 @@ def build_application() -> Application:
                     disable_web_page_preview=True,
                     parse_mode="HTML",
                 )
+                sent_count += 1
             except Exception as exc:
                 logger.warning("Failed to broadcast to %s: %s", chat_id, exc)
+        if sent_count > 0:
+            db.set_last_broadcast_at(_utc_now_iso())
 
-    scheduler.register_broadcast_callback(broadcast_news)
+    scheduler.register_broadcast_callback(lambda: broadcast_news(force_send=False))
+    app.bot_data["broadcast_callback"] = broadcast_news
+    app.bot_data["watcher_interval_seconds"] = int(WATCH_INTERVAL.total_seconds())
+    app.bot_data["watcher_cooldown_seconds"] = int(ALERT_COOLDOWN.total_seconds())
 
     # User commands
     app.add_handler(CommandHandler("start", user_handlers.start))
@@ -134,6 +151,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("schedule", admin_handlers.schedule_status))
     app.add_handler(CommandHandler("pauseschedule", admin_handlers.pause_schedule))
     app.add_handler(CommandHandler("resumeschedule", admin_handlers.resume_schedule))
+    app.add_handler(CommandHandler("addchannel", admin_handlers.add_channel))
+    app.add_handler(CommandHandler("removechannel", admin_handlers.remove_channel))
+    app.add_handler(CommandHandler("listchannels", admin_handlers.list_channels))
+    app.add_handler(CommandHandler("sendtest", admin_handlers.send_test))
     app.add_error_handler(on_error)
 
     return app
@@ -142,17 +163,69 @@ def build_application() -> Application:
 async def run() -> None:
     settings = load_settings()
     app = build_application()
+    watcher_task: asyncio.Task | None = None
+
+    async def signal_watcher_loop() -> None:
+        db: Database = app.bot_data["db"]
+        news_service: NewsService = app.bot_data["news_service"]
+        groq_service: GroqService = app.bot_data["groq_service"]
+        broadcast_cb = app.bot_data["broadcast_callback"]
+        interval_seconds = int(app.bot_data.get("watcher_interval_seconds", 600))
+        cooldown_seconds = int(app.bot_data.get("watcher_cooldown_seconds", 7200))
+        while True:
+            try:
+                await news_service.fetch_and_cache_market_snapshot()
+                market_context = await news_service.build_market_context()
+                curated = await groq_service.curate_news_update(market_context=market_context)
+                signal, confidence = _extract_signal_confidence(curated)
+                should_fire = _should_trigger_signal_alert(signal=signal, confidence=confidence)
+                if should_fire:
+                    state = db.get_last_alert_state()
+                    signal_hash = _build_alert_hash(curated)
+                    now = datetime.now(timezone.utc)
+                    last_hash = str(state.get("hash") or "")
+                    last_sent_at = str(state.get("sent_at") or "")
+                    in_cooldown = False
+                    if last_sent_at:
+                        try:
+                            last_dt = datetime.fromisoformat(last_sent_at)
+                            in_cooldown = (now - last_dt).total_seconds() < cooldown_seconds
+                        except Exception:
+                            in_cooldown = False
+                    if not in_cooldown:
+                        await broadcast_cb(force_send=True)
+                        sent_at = _utc_now_iso()
+                        db.set_last_alert_state(
+                            signal_hash=signal_hash,
+                            signal=signal,
+                            confidence=confidence,
+                            sent_at=sent_at,
+                        )
+                logger.info(
+                    "watcher_tick signal=%s confidence=%s trigger=%s",
+                    signal or "unknown",
+                    confidence or "unknown",
+                    should_fire,
+                )
+            except Exception as exc:
+                logger.warning("Signal watcher tick failed: %s", exc)
+            await asyncio.sleep(interval_seconds)
 
     if settings.polling_mode or not settings.webhook_url:
         logger.info("Starting bot in polling mode.")
         await app.initialize()
         await app.start()
         await register_commands(app)
+        watcher_task = asyncio.create_task(signal_watcher_loop(), name="signal_watcher_loop")
         await app.updater.start_polling()
         try:
             while True:
                 await asyncio.sleep(3600)
         finally:
+            if watcher_task:
+                watcher_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watcher_task
             await app.updater.stop()
             await app.stop()
             await app.shutdown()
@@ -242,6 +315,8 @@ def _to_html_headlines(text: str) -> str:
     seen: set[str] = set()
     for line in lines:
         clean = line.replace("**", "").replace("__", "").strip()
+        if clean.lower().rstrip(":") == "top headlines":
+            continue
         payload = clean.lstrip("-• ").strip()
         if not payload:
             continue
@@ -253,6 +328,36 @@ def _to_html_headlines(text: str) -> str:
     if not bullets:
         bullets = ["• Headlines unavailable."]
     return "<b>Top Headlines</b>\n" + "\n".join(bullets[:3])
+
+
+def _extract_signal_confidence(text: str) -> tuple[str, str]:
+    signal = ""
+    confidence = ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    for line in lines:
+        lower = line.lower()
+        if lower.startswith("signal:"):
+            signal = line.split(":", 1)[1].strip().upper()
+        elif lower.startswith("confidence:"):
+            confidence = line.split(":", 1)[1].strip().capitalize()
+    return signal, confidence
+
+
+def _should_trigger_signal_alert(signal: str, confidence: str) -> bool:
+    if signal == "BUY" and confidence == "High":
+        return True
+    if signal == "SELL" and confidence in {"Low", "Medium"}:
+        return True
+    return False
+
+
+def _build_alert_hash(curated_text: str) -> str:
+    normalized = " ".join(curated_text.strip().lower().split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 if __name__ == "__main__":

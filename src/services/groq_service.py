@@ -149,9 +149,44 @@ class GroqService:
                 "Showing raw website headlines instead."
             )
 
+    async def curate_news_summary(self, market_context: str) -> str:
+        if not self._api_key and not self._openrouter_api_key:
+            return "Summary unavailable: AI key is not configured."
+
+        system_prompt = (
+            "You are a gold market summarizer. "
+            "Write a concise daily summary for Telegram users in plain English. "
+            "Do not output trading signal labels like Signal/Confidence/BUY/SELL/HOLD. "
+            "Focus on: price move, key drivers, and what happened in this summary window. "
+            "Keep response between 70 and 120 words."
+        )
+        model = await self._resolve_model()
+        payload = {
+            "model": model,
+            "temperature": 0.25,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "Create a clean Telegram-ready summary from this context:\n\n"
+                        f"{market_context}\n\n"
+                        "Return plain text only."
+                    ),
+                },
+            ],
+        }
+        headers = self._headers()
+        try:
+            data = await self._send_chat(payload=payload, headers=headers)
+            content = data["choices"][0]["message"]["content"]
+            return str(content).strip()
+        except Exception:
+            return "Gold moved within the summary window based on available feeds; key catalysts were mixed across macro and geopolitical headlines."
+
     async def curate_headlines(self, headline_context: str) -> str:
         if not self._api_key and not self._openrouter_api_key:
-            return "Top Headlines:\n- AI unavailable (missing API key)."
+            return self._headline_backup_from_context(headline_context)
 
         system_prompt = (
             "You are a gold news editor writing for everyday traders in plain English. "
@@ -176,8 +211,12 @@ class GroqService:
             data = await self._send_chat(payload=payload, headers=headers)
             content = str(data["choices"][0]["message"]["content"]).strip()
             return content
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 402 and self._openrouter_api_key:
+                return self._headline_backup_from_context(headline_context)
+            return self._headline_backup_from_context(headline_context)
         except Exception:
-            return "Top Headlines:\n- Headline curation unavailable right now."
+            return self._headline_backup_from_context(headline_context)
 
     def _headers(self) -> dict[str, str]:
         if self._openrouter_api_key:
@@ -228,3 +267,30 @@ class GroqService:
         except Exception:
             return None
         return None
+
+    def _headline_backup_from_context(self, headline_context: str) -> str:
+        lines = [line.strip() for line in headline_context.splitlines() if line.strip()]
+        candidates: list[str] = []
+        for line in lines:
+            if line.lower().startswith("price snapshot:"):
+                continue
+            if line.lower().startswith("candidate headlines ranked by quality:"):
+                continue
+            if line.lower().startswith("top 3 gold headlines:"):
+                continue
+            if ". " in line and line[0].isdigit():
+                payload = line.split(". ", 1)[1].strip()
+            else:
+                payload = line
+            if "|" in payload:
+                payload = payload.split("|", 1)[0].strip()
+            if payload:
+                candidates.append(payload)
+            if len(candidates) >= 3:
+                break
+
+        if len(candidates) < 3:
+            while len(candidates) < 3:
+                candidates.append("Gold market update pending fresh catalyst confirmation from current feeds.")
+
+        return "\n".join(f"- {item}" for item in candidates[:3])

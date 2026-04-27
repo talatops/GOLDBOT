@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from html import escape
 
 from telegram import Update
@@ -39,7 +40,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/setdaily <HH:MM>\n"
         "/schedule\n"
         "/pauseschedule\n"
-        "/resumeschedule"
+        "/resumeschedule\n"
+        "/addchannel <channel_id> [name]\n"
+        "/removechannel <channel_id>\n"
+        "/listchannels\n"
+        "/sendtest"
     )
     await update.effective_message.reply_text(text)
 
@@ -57,23 +62,16 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     news_service: NewsService = context.application.bot_data["news_service"]
     groq_service: GroqService = context.application.bot_data["groq_service"]
+    db = context.application.bot_data["db"]
+    since_iso = db.get_last_broadcast_at()
+    if not since_iso:
+        since_iso = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
     await news_service.fetch_and_cache_market_snapshot(owner_user_id=user.id if user else None)
-    top_news = await news_service.get_top_news(owner_user_id=user.id if user else None, limit=3)
-    price = await news_service.get_live_price_snapshot()
-    market_context = await news_service.build_market_context(owner_user_id=user.id if user else None)
-    curated = await groq_service.curate_news_update(market_context=market_context)
-    formatted_curated = _to_html_sections(curated)
-    sources_html = news_service.build_sources_html(top_news)
-    price_html = (
-        f"<b>Live Price</b>\n"
-        f"XAUUSD: <b>{escape(price['price'])}</b> | "
-        f"Chg: {escape(price['change'])} ({escape(price['change_percent'])})\n"
-        f"Source: {escape(price['source'])}\n"
-        f"<a href=\"https://www.tradingview.com/chart/?symbol=TVC%3AGOLD\">Open TradingView GOLD Chart</a>"
-    )
-    final_message = f"{price_html}\n\n{formatted_curated}\n\n{sources_html}"
+    market_context = await news_service.build_market_context(owner_user_id=user.id if user else None, since_iso=since_iso)
+    curated = await groq_service.curate_news_summary(market_context=market_context)
+    formatted_curated = _to_html_summary(curated)
     await update.effective_message.reply_text(
-        final_message,
+        formatted_curated,
         disable_web_page_preview=True,
         parse_mode="HTML",
     )
@@ -248,6 +246,13 @@ def _to_html_sections(text: str) -> str:
     )
 
 
+def _to_html_summary(text: str) -> str:
+    lines = [line.strip().replace("**", "").replace("__", "") for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "<b>Gold Summary</b>\nNo summary available."
+    return "<b>Gold Summary</b>\n" + "\n".join(escape(line) for line in lines)
+
+
 def _to_html_answer(text: str) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
@@ -261,6 +266,8 @@ def _to_html_headline(text: str) -> str:
     seen: set[str] = set()
     for line in lines:
         clean = line.replace("**", "").replace("__", "").strip()
+        if clean.lower().rstrip(":") == "top headlines":
+            continue
         payload = clean.lstrip("-• ").strip()
         if not payload:
             continue

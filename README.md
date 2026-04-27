@@ -3,12 +3,14 @@
 Python Telegram bot with:
 - temporary access permissions managed by owner
 - one global scheduled gold market digest
+- event-driven signal watcher that can post automatically
 - Groq-powered custom Q&A
 
 ## Features
 - Owner can grant user access for hours or days.
 - Authorized users can request latest gold digest using hardcoded sources.
 - Owner can configure one global cron schedule for periodic broadcast.
+- Bot runs a 10-minute signal watcher and auto-posts when trigger rule matches.
 - Authorized users can ask market questions with Groq-generated responses.
 - Authorized users can add/remove their own custom RSS/news websites via slash commands.
 
@@ -72,14 +74,27 @@ No separate gold price API key is required in this mode.
 - `/schedule`
 - `/pauseschedule`
 - `/resumeschedule`
+- `/addchannel <channel_id> [name]`
+- `/removechannel <channel_id>`
+- `/listchannels`
+- `/sendtest`
 
 ### Authorized users
 - `/headline`
-- `/news`
+- `/news` (summary window is since last successful broadcast checkpoint)
 - `/ask <question>`
 - `/addsite <url> [name]`
 - `/removesite <url>`
 - `/listsites`
+
+## Dynamic Signal Posting (24/7)
+- A background watcher checks market/news every 10 minutes.
+- Auto-post trigger rule:
+  - `BUY + High`, or
+  - `SELL + Low/Medium`
+- Duplicate suppression:
+  - identical alert content is deduped during cooldown window.
+- `/sendtest` bypasses trigger checks and sends immediately for verification.
 
 ## Free Deployment Options
 

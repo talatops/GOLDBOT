@@ -81,6 +81,14 @@ class Database:
                     created_at TEXT NOT NULL,
                     UNIQUE(owner_user_id, source_url)
                 );
+
+                CREATE TABLE IF NOT EXISTS broadcast_channels (
+                    channel_id INTEGER PRIMARY KEY,
+                    channel_name TEXT,
+                    added_by INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -167,6 +175,26 @@ class Database:
                 return default
             return str(row["setting_value"])
 
+    def get_last_broadcast_at(self) -> str | None:
+        return self.get_setting("last_broadcast_at")
+
+    def set_last_broadcast_at(self, value: str) -> None:
+        self.set_setting("last_broadcast_at", value)
+
+    def get_last_alert_state(self) -> dict[str, str | None]:
+        return {
+            "hash": self.get_setting("last_alert_hash"),
+            "signal": self.get_setting("last_alert_signal"),
+            "confidence": self.get_setting("last_alert_confidence"),
+            "sent_at": self.get_setting("last_alert_sent_at"),
+        }
+
+    def set_last_alert_state(self, signal_hash: str, signal: str, confidence: str, sent_at: str) -> None:
+        self.set_setting("last_alert_hash", signal_hash)
+        self.set_setting("last_alert_signal", signal)
+        self.set_setting("last_alert_confidence", confidence)
+        self.set_setting("last_alert_sent_at", sent_at)
+
     def add_news_items(self, items: Iterable[dict[str, str | None]]) -> None:
         now = self._now_iso()
         with closing(self._connect()) as conn, conn:
@@ -199,6 +227,20 @@ class Database:
                 LIMIT ?
                 """,
                 (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_news_since(self, since_iso: str, limit: int = 200) -> list[dict[str, str | None]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT source, title, url, published_at, created_at
+                FROM news_cache
+                WHERE created_at >= ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (since_iso, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -278,4 +320,35 @@ class Database:
                     """,
                     (owner_user_id,),
                 ).fetchall()
+        return [dict(row) for row in rows]
+
+    def add_broadcast_channel(self, channel_id: int, added_by: int, channel_name: str | None = None) -> None:
+        now = self._now_iso()
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO broadcast_channels(channel_id, channel_name, added_by, created_at, updated_at)
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(channel_id) DO UPDATE SET
+                    channel_name=excluded.channel_name,
+                    added_by=excluded.added_by,
+                    updated_at=excluded.updated_at
+                """,
+                (channel_id, channel_name, added_by, now, now),
+            )
+
+    def remove_broadcast_channel(self, channel_id: int) -> bool:
+        with closing(self._connect()) as conn, conn:
+            cursor = conn.execute("DELETE FROM broadcast_channels WHERE channel_id = ?", (channel_id,))
+            return cursor.rowcount > 0
+
+    def list_broadcast_channels(self) -> list[dict[str, str | int | None]]:
+        with closing(self._connect()) as conn:
+            rows = conn.execute(
+                """
+                SELECT channel_id, channel_name, added_by, created_at, updated_at
+                FROM broadcast_channels
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
         return [dict(row) for row in rows]

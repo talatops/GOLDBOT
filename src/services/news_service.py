@@ -51,10 +51,27 @@ class NewsService:
             self._db.add_news_items(news)
         return news
 
-    async def get_top_news(self, owner_user_id: int | None = None, limit: int = 5) -> list[dict[str, str | None]]:
-        news = self._db.get_recent_news(limit=limit * 2)
+    async def get_top_news(
+        self, owner_user_id: int | None = None, limit: int = 5, since_iso: str | None = None
+    ) -> list[dict[str, str | None]]:
+        if since_iso:
+            news = self._db.get_news_since(since_iso=since_iso, limit=max(40, limit * 8))
+        else:
+            news = self._db.get_recent_news(limit=limit * 2)
         if not news:
             news = await self.fetch_and_cache_market_snapshot(owner_user_id=owner_user_id)
+        for item in news:
+            source_name = str(item.get("source") or "Unknown")
+            conf = int(item.get("source_confidence") or self._source_confidence(source_name))
+            item["source_confidence"] = str(conf)
+            if not item.get("quality_score"):
+                item["quality_score"] = str(
+                    _quality_score(
+                        title=str(item.get("title") or ""),
+                        published_at=item.get("published_at"),
+                        source_confidence=conf,
+                    )
+                )
         ranked = sorted(news, key=lambda x: _to_float(x.get("quality_score")) or 0, reverse=True)
         deduped: list[dict[str, str | None]] = []
         seen_url: set[str] = set()
@@ -76,16 +93,17 @@ class NewsService:
                 break
         return deduped[:limit]
 
-    async def build_market_context(self, owner_user_id: int | None = None) -> str:
-        news = await self.get_top_news(owner_user_id=owner_user_id, limit=3)
+    async def build_market_context(self, owner_user_id: int | None = None, since_iso: str | None = None) -> str:
+        news = await self.get_top_news(owner_user_id=owner_user_id, limit=3, since_iso=since_iso)
         price = await self.get_live_price_snapshot()
         price_line = (
             f"Live gold price snapshot: XAUUSD={price['price']} | change={price['change']} | "
             f"change_percent={price['change_percent']} | source={price['source']} | fallback={price['fallback_active']}"
         )
+        window_line = f"Summary window start (UTC): {since_iso}" if since_iso else "Summary window: latest snapshot"
         if not news:
-            return f"{price_line}\nNo fresh gold headlines found."
-        lines = [price_line, "Top 3 fresh gold headlines (with source confidence):"]
+            return f"{price_line}\n{window_line}\nNo fresh gold headlines found."
+        lines = [price_line, window_line, "Top 3 fresh gold headlines (with source confidence):"]
         for idx, item in enumerate(news, start=1):
             title = str(item.get("title") or "Untitled")
             source = str(item.get("source") or "Source")
