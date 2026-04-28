@@ -102,7 +102,7 @@ def build_application() -> Application:
         )
         final_message = f"{price_html}\n\n{_to_html_sections(curated)}\n\n{sources_html}"
         headline_message = _to_html_headlines(headline_text)
-        recipients = {settings.bot_owner_id}
+        recipients = set(settings.bot_owner_ids)
         recipients.update(user.telegram_user_id for user in db.list_authorized_users())
         recipients.update(int(item["channel_id"]) for item in db.list_broadcast_channels())
         sent_count = 0
@@ -301,7 +301,7 @@ def _to_html_sections(text: str) -> str:
 
     return (
         "<b>Trade Signal</b>\n"
-        f"<b>Signal</b>: {escape(signal)}\n"
+        f"<b>Signal</b>: {escape(_decorate_signal(signal))}\n"
         f"<b>Confidence</b>: {escape(confidence)}\n"
         f"<b>Reason</b>: {escape(reason)}"
     )
@@ -358,6 +358,15 @@ def _build_alert_hash(curated_text: str) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _decorate_signal(signal: str) -> str:
+    mapping = {
+        "BUY": "🟢 BUY",
+        "SELL": "🔴 SELL",
+        "HOLD": "🟡 HOLD",
+    }
+    return mapping.get(signal, signal)
 
 
 if __name__ == "__main__":

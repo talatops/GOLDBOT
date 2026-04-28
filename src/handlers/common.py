@@ -27,7 +27,7 @@ def owner_only(handler: Callable[[Update, ContextTypes.DEFAULT_TYPE], Any]):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = context.application.bot_data["settings"]
         user = update.effective_user
-        if not user or user.id != settings.bot_owner_id:
+        if not user or user.id not in set(settings.bot_owner_ids):
             if update.effective_message:
                 try:
                     await update.effective_message.reply_text("Only the bot owner can use this command.")
@@ -47,7 +47,7 @@ async def ensure_authorized(
     user = update.effective_user
     if not user:
         return False
-    if require_owner_override and user.id == settings.bot_owner_id:
+    if require_owner_override and user.id in set(settings.bot_owner_ids):
         return True
     if db.is_user_authorized(user.id):
         return True
