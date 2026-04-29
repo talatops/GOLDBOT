@@ -201,12 +201,12 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     interval_seconds = int(context.application.bot_data.get("watcher_interval_seconds", 3600))
     cooldown_seconds = int(context.application.bot_data.get("watcher_cooldown_seconds", 86400))
     watch_state = db.get_watch_state()
-    last_checked = watch_state.get("last_checked_at") or "never"
-    last_signal = watch_state.get("last_signal") or "unknown"
-    last_confidence = watch_state.get("last_confidence") or "unknown"
+    last_checked = watch_state.get("last_checked_at") or "not checked yet"
+    last_signal = watch_state.get("last_signal") or "not available yet"
+    last_confidence = watch_state.get("last_confidence") or "not available yet"
     last_price = watch_state.get("last_price") or "n/a"
     last_sent = watch_state.get("last_sent_at") or "never"
-    next_check = "unknown"
+    next_check = "not scheduled yet"
     cooldown_remaining = "0s"
 
     if watch_state.get("last_checked_at"):
@@ -214,7 +214,7 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             checked_dt = datetime.fromisoformat(str(watch_state["last_checked_at"]))
             next_check = (checked_dt + timedelta(seconds=interval_seconds)).isoformat()
         except Exception:
-            next_check = "unknown"
+            next_check = "not scheduled yet"
 
     if watch_state.get("last_sent_at"):
         try:

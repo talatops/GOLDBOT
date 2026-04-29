@@ -188,7 +188,7 @@ def _to_html_sections(text: str) -> str:
     if not lines:
         return "<b>Trade Signal</b>\nSignal: HOLD\nConfidence: Low\nReason: No generated analysis available."
 
-    signal = "HOLD"
+    signal = "BUY"
     confidence = "Low"
     reason = ""
 
@@ -239,12 +239,17 @@ def _to_html_sections(text: str) -> str:
                 "USD strength continuation, as either can sustain selling until risk sentiment shifts."
             )
         else:
-            signal = "HOLD"
-            confidence = "Low"
+            signal = "SELL" if any(token in text_blob.lower() for token in ("down", "fall", "drop", "bear")) else "BUY"
+            confidence = "Medium"
             reason = (
                 "Current inputs are mixed, so directional edge is limited; wait for confirmation from a clean "
                 "break in trend, stronger macro catalyst, or a decisive move in yields before taking size."
             )
+
+    if signal == "HOLD":
+        signal = "SELL" if any(token in reason.lower() for token in ("down", "fall", "drop", "bear", "sell")) else "BUY"
+        if confidence == "Low":
+            confidence = "Medium"
 
     return (
         "<b>Trade Signal</b>\n"

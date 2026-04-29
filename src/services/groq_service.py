@@ -113,12 +113,12 @@ class GroqService:
             "You are a professional gold market analyst. "
             "Write a concise actionable brief for traders based on provided headlines and live price snapshot. "
             "Output exactly these fields and nothing else: "
-            "Signal: BUY/SELL/HOLD, Confidence: High/Medium/Low, Reason: detailed explanation. "
+            "Signal: BUY/SELL, Confidence: High/Medium/Low, Reason: detailed explanation. "
             "Keep total response between 55 and 110 words. "
             "Reason MUST be concrete and include exactly 3 parts in one sentence: "
             "(1) current price action with number, (2) dominant catalyst from the provided headlines, "
             "(3) a clear trigger level/event to change stance. "
-            "Never use generic placeholders like 'mixed signals' or 'no clear trigger'."
+            "Never use generic placeholders like 'mixed signals' or 'no clear trigger'. Never output HOLD."
         )
         model = await self._resolve_model()
         payload = {
@@ -132,7 +132,7 @@ class GroqService:
                         "Create a clean Telegram-ready gold market brief in HTML-friendly plain text from this context:\n\n"
                         f"{market_context}\n\n"
                         "Use this strict shape:\n"
-                        "Signal: <BUY|SELL|HOLD>\n"
+                        "Signal: <BUY|SELL>\n"
                         "Confidence: <High|Medium|Low>\n"
                         "Reason: <one sentence with 3 concrete parts>."
                     ),
@@ -147,20 +147,20 @@ class GroqService:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 402 and self._openrouter_api_key:
                 return (
-                    "Signal: HOLD\n"
-                    "Confidence: Low\n"
-                    "Reason: AI model quota is unavailable right now, so signal is held until the next successful analysis cycle."
+                    "Signal: SELL\n"
+                    "Confidence: Medium\n"
+                    "Reason: AI model quota is unavailable right now, so a conservative downside bias is used until the next successful analysis cycle."
                 )
             return (
-                "Signal: HOLD\n"
-                "Confidence: Low\n"
-                "Reason: AI provider request failed, so signal is held until fresh analysis is available."
+                "Signal: SELL\n"
+                "Confidence: Medium\n"
+                "Reason: AI provider request failed, so a conservative downside bias is used until fresh analysis is available."
             )
         except Exception:
             return (
-                "Signal: HOLD\n"
-                "Confidence: Low\n"
-                "Reason: AI service is temporarily unreachable, so signal is held until the next successful run."
+                "Signal: SELL\n"
+                "Confidence: Medium\n"
+                "Reason: AI service is temporarily unreachable, so a conservative downside bias is used until the next successful run."
             )
 
     async def curate_news_summary(self, market_context: str) -> str:

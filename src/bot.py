@@ -159,8 +159,14 @@ def build_application() -> Application:
                 signal, confidence = _extract_signal_confidence(curated)
                 reason = retry_reason
 
+        price_snapshot = await news_service.get_live_price_snapshot()
+        current_price = str(price_snapshot.get("price") or "n/a")
+        signal, confidence = _apply_signal_validation(
+            signal=signal,
+            confidence=confidence,
+            change_percent=str(price_snapshot.get("change_percent") or ""),
+        )
         should_fire = _should_trigger_signal_alert(signal=signal, confidence=confidence)
-        current_price = str((await news_service.get_live_price_snapshot()).get("price") or "n/a")
         headlines_hash = _build_headlines_hash(top_news)
         checked_at = _utc_now_iso()
         watch_state = db.get_watch_state()
@@ -321,7 +327,7 @@ def _to_html_sections(text: str) -> str:
     if not lines:
         return "<b>Trade Signal</b>\nSignal: HOLD\nConfidence: Low\nReason: No generated analysis available."
 
-    signal = "HOLD"
+    signal = "BUY"
     confidence = "Low"
     reason = ""
 
@@ -372,12 +378,17 @@ def _to_html_sections(text: str) -> str:
                 "USD strength continuation, as either can sustain selling until risk sentiment shifts."
             )
         else:
-            signal = "HOLD"
-            confidence = "Low"
+            signal = "SELL" if any(token in text_blob.lower() for token in ("down", "fall", "drop", "bear")) else "BUY"
+            confidence = "Medium"
             reason = (
                 "Current inputs are mixed, so directional edge is limited; wait for confirmation from a clean "
                 "break in trend, stronger macro catalyst, or a decisive move in yields before taking size."
             )
+
+    if signal == "HOLD":
+        signal = _normalize_non_hold_signal(reason)
+        if confidence == "Low":
+            confidence = "Medium"
 
     return (
         "<b>Trade Signal</b>\n"
@@ -420,6 +431,10 @@ def _extract_signal_confidence(text: str) -> tuple[str, str]:
             signal = line.split(":", 1)[1].strip().upper()
         elif lower.startswith("confidence:"):
             confidence = line.split(":", 1)[1].strip().capitalize()
+    if signal == "HOLD":
+        signal = _normalize_non_hold_signal(text)
+        if not confidence:
+            confidence = "Medium"
     return signal, confidence
 
 
@@ -452,6 +467,42 @@ def _extract_reason(text: str) -> str:
 def _is_weak_reason(reason: str) -> bool:
     normalized = " ".join(reason.strip().lower().split())
     return not normalized or normalized in {"none", "n/a", "na"}
+
+
+def _normalize_non_hold_signal(text: str) -> str:
+    lower = text.lower()
+    bearish = ("down", "drop", "fall", "bear", "selling", "sell", "pressure")
+    if any(token in lower for token in bearish):
+        return "SELL"
+    return "BUY"
+
+
+def _apply_signal_validation(signal: str, confidence: str, change_percent: str) -> tuple[str, str]:
+    pct = _parse_percent(change_percent)
+    normalized_signal = signal.upper().strip()
+    normalized_conf = confidence.capitalize().strip() if confidence else "Medium"
+    if normalized_conf not in {"High", "Medium", "Low"}:
+        normalized_conf = "Medium"
+
+    if pct is not None:
+        if pct <= -1.0:
+            return "SELL", normalized_conf
+        if pct >= 1.0:
+            return "BUY", normalized_conf
+        if normalized_signal not in {"BUY", "SELL"}:
+            return ("BUY" if pct >= 0 else "SELL"), "Medium"
+
+    if normalized_signal == "HOLD" or normalized_signal not in {"BUY", "SELL"}:
+        return "BUY", "Medium"
+    return normalized_signal, normalized_conf
+
+
+def _parse_percent(value: str) -> float | None:
+    clean = value.replace("%", "").replace(",", "").strip()
+    try:
+        return float(clean)
+    except Exception:
+        return None
 
 
 def _price_moved_enough(last_price: str, current_price: str) -> bool:
