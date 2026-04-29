@@ -54,6 +54,14 @@ Use these commands only from the Telegram account configured as bot owner.
   Sends an immediate test broadcast (headline + news) to owner/users/channels.
   Example: `/sendtest`
 
+- `/watchstatus`  
+  Shows watcher health and state such as last check, last signal, last sent alert, next check, and cooldown.
+  Example: `/watchstatus`
+
+- `/forcerunwatch`  
+  Forces one watcher cycle immediately without waiting for the next hourly run.
+  Example: `/forcerunwatch`
+
 ## TEMPORARY USER Commands
 
 Use these after owner has granted access via `/adduser`.
@@ -89,8 +97,14 @@ Use these after owner has granted access via `/adduser`.
 
 ## Dynamic Signal Posting (Always-On)
 
-- Bot watcher runs every 10 minutes in polling mode.
+- Bot watcher runs every 1 hour in polling mode.
 - Auto-post rule:
   - `BUY + High`, or
-  - `SELL + Low/Medium`
-- If trigger matches, bot sends headline + news immediately (outside cron schedule).
+  - `SELL + High`
+- Alert sends only when there is a material change:
+  - signal flipped, or
+  - price moved at least 1%, or
+  - top signal-news set changed
+- Normal cooldown is 24 hours unless the signal flips side.
+- If the AI returns a weak or empty `Reason`, the bot retries once and then skips the alert if it is still weak.
+- Auto signal sends only the signal message, not the separate headline message.

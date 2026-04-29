@@ -44,7 +44,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/addchannel <channel_id> [name]\n"
         "/removechannel <channel_id>\n"
         "/listchannels\n"
-        "/sendtest"
+        "/sendtest\n"
+        "/watchstatus\n"
+        "/forcerunwatch"
     )
     await update.effective_message.reply_text(text)
 
@@ -213,6 +215,12 @@ def _to_html_sections(text: str) -> str:
         ).strip()
         if free_text:
             reason = free_text
+
+    if reason and (
+        "showing raw website headlines instead" in reason.lower()
+        or "ai provider rejected the request" in reason.lower()
+    ):
+        reason = "AI analysis is temporarily unavailable, so signal remains conservative until the next successful evaluation."
 
     if not reason:
         text_blob = " ".join(lines)

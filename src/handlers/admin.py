@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from src.handlers.common import expires_at_from_duration, owner_only, parse_duration
 from src.services.scheduler_service import daily_to_cron
 from src.storage.db import Database
@@ -191,4 +193,62 @@ async def send_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except TypeError:
         await callback()
     await update.effective_message.reply_text("Test broadcast sent to owner, authorized users, and configured channels.")
+
+
+@owner_only
+async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: Database = context.application.bot_data["db"]
+    interval_seconds = int(context.application.bot_data.get("watcher_interval_seconds", 3600))
+    cooldown_seconds = int(context.application.bot_data.get("watcher_cooldown_seconds", 86400))
+    watch_state = db.get_watch_state()
+    last_checked = watch_state.get("last_checked_at") or "never"
+    last_signal = watch_state.get("last_signal") or "unknown"
+    last_confidence = watch_state.get("last_confidence") or "unknown"
+    last_price = watch_state.get("last_price") or "n/a"
+    last_sent = watch_state.get("last_sent_at") or "never"
+    next_check = "unknown"
+    cooldown_remaining = "0s"
+
+    if watch_state.get("last_checked_at"):
+        try:
+            checked_dt = datetime.fromisoformat(str(watch_state["last_checked_at"]))
+            next_check = (checked_dt + timedelta(seconds=interval_seconds)).isoformat()
+        except Exception:
+            next_check = "unknown"
+
+    if watch_state.get("last_sent_at"):
+        try:
+            sent_dt = datetime.fromisoformat(str(watch_state["last_sent_at"]))
+            remaining = sent_dt + timedelta(seconds=cooldown_seconds) - datetime.now(timezone.utc)
+            cooldown_remaining = "0s" if remaining.total_seconds() <= 0 else str(remaining).split(".")[0]
+        except Exception:
+            cooldown_remaining = "unknown"
+
+    lines = [
+        "Watcher status:",
+        f"- Last checked: {last_checked}",
+        f"- Last signal: {last_signal} ({last_confidence})",
+        f"- Last price: {last_price}",
+        f"- Last sent alert: {last_sent}",
+        f"- Next check: {next_check}",
+        f"- Cooldown remaining: {cooldown_remaining}",
+    ]
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+@owner_only
+async def force_run_watch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    callback = context.application.bot_data.get("watch_cycle_callback")
+    if callback is None:
+        await update.effective_message.reply_text("Signal watcher is not ready yet. Try again in a few seconds.")
+        return
+    await update.effective_message.reply_text("Running watcher cycle now...")
+    result = await callback(force_send=True)
+    await update.effective_message.reply_text(
+        f"Watcher cycle complete.\n"
+        f"Signal: {result.get('signal', 'unknown')}\n"
+        f"Confidence: {result.get('confidence', 'unknown')}\n"
+        f"Sent: {result.get('sent', False)}\n"
+        f"Decision: {result.get('decision', 'unknown')}"
+    )
 

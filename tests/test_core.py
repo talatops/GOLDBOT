@@ -3,7 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from src.bot import _extract_signal_confidence, _should_trigger_signal_alert
+from src.bot import (
+    _extract_reason,
+    _extract_signal_confidence,
+    _is_weak_reason,
+    _price_moved_enough,
+    _should_trigger_signal_alert,
+)
 from src.handlers.common import parse_duration
 from src.services.scheduler_service import cron_trigger_from_expression, daily_to_cron
 from src.storage.db import Database
@@ -87,19 +93,40 @@ def test_alert_state_and_broadcast_checkpoint(tmp_path: Path) -> None:
         signal="BUY",
         confidence="High",
         sent_at="2026-01-01T00:10:00+00:00",
+        price="4764.56",
+        headlines_hash="head123",
     )
     state = db.get_last_alert_state()
     assert state["hash"] == "abc123"
     assert state["signal"] == "BUY"
     assert state["confidence"] == "High"
     assert state["sent_at"] == "2026-01-01T00:10:00+00:00"
+    assert state["price"] == "4764.56"
+    assert state["headlines_hash"] == "head123"
+
+
+def test_watch_state_persistence(tmp_path: Path) -> None:
+    db = Database(tmp_path / "watch.db")
+    db.set_watch_state(
+        checked_at="2026-01-01T01:00:00+00:00",
+        signal="SELL",
+        confidence="High",
+        price="4700.00",
+        headlines_hash="news456",
+    )
+    state = db.get_watch_state()
+    assert state["last_checked_at"] == "2026-01-01T01:00:00+00:00"
+    assert state["last_signal"] == "SELL"
+    assert state["last_confidence"] == "High"
+    assert state["last_price"] == "4700.00"
+    assert state["last_headlines_hash"] == "news456"
 
 
 def test_signal_trigger_policy() -> None:
     assert _should_trigger_signal_alert("BUY", "High") is True
-    assert _should_trigger_signal_alert("SELL", "Low") is True
-    assert _should_trigger_signal_alert("SELL", "Medium") is True
-    assert _should_trigger_signal_alert("SELL", "High") is False
+    assert _should_trigger_signal_alert("SELL", "High") is True
+    assert _should_trigger_signal_alert("SELL", "Low") is False
+    assert _should_trigger_signal_alert("SELL", "Medium") is False
     assert _should_trigger_signal_alert("BUY", "Medium") is False
     assert _should_trigger_signal_alert("HOLD", "High") is False
 
@@ -113,3 +140,17 @@ def test_extract_signal_confidence_from_curated_text() -> None:
     signal, confidence = _extract_signal_confidence(text)
     assert signal == "SELL"
     assert confidence == "Medium"
+
+
+def test_extract_reason_and_weak_reason_detection() -> None:
+    text = "Signal: BUY\nConfidence: High\nReason: Gold is breaking higher on softer yields."
+    assert _extract_reason(text) == "Gold is breaking higher on softer yields."
+    assert _is_weak_reason("") is True
+    assert _is_weak_reason("N/A") is True
+    assert _is_weak_reason("Gold is breaking higher on softer yields.") is False
+
+
+def test_price_move_threshold() -> None:
+    assert _price_moved_enough("100", "101") is True
+    assert _price_moved_enough("100", "100.7") is False
+    assert _price_moved_enough("n/a", "101") is False

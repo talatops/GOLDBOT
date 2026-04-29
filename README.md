@@ -10,7 +10,7 @@ Python Telegram bot with:
 - Owner can grant user access for hours or days.
 - Authorized users can request latest gold digest using hardcoded sources.
 - Owner can configure one global cron schedule for periodic broadcast.
-- Bot runs a 10-minute signal watcher and auto-posts when trigger rule matches.
+- Bot runs a 1-hour signal watcher and auto-posts only on meaningful high-confidence signal changes.
 - Authorized users can ask market questions with Groq-generated responses.
 - Authorized users can add/remove their own custom RSS/news websites via slash commands.
 
@@ -78,6 +78,8 @@ No separate gold price API key is required in this mode.
 - `/removechannel <channel_id>`
 - `/listchannels`
 - `/sendtest`
+- `/watchstatus`
+- `/forcerunwatch`
 
 ### Authorized users
 - `/headline`
@@ -88,13 +90,22 @@ No separate gold price API key is required in this mode.
 - `/listsites`
 
 ## Dynamic Signal Posting (24/7)
-- A background watcher checks market/news every 10 minutes.
+- A background watcher checks market/news every 1 hour.
 - Auto-post trigger rule:
   - `BUY + High`, or
-  - `SELL + Low/Medium`
-- Duplicate suppression:
-  - identical alert content is deduped during cooldown window.
-- `/sendtest` bypasses trigger checks and sends immediately for verification.
+  - `SELL + High`
+- Extra send gate:
+  - signal flipped from previous alert, or
+  - gold moved at least 1%, or
+  - top signal headlines changed meaningfully
+- Cooldown:
+  - 24 hours
+  - bypassed only when the signal flips side
+- Weak AI output protection:
+  - if `Reason` is empty/weak, the bot retries once
+  - if still weak, it skips the alert instead of sending a bad signal
+- `/watchstatus` shows last check, last signal, last sent time, next check, and cooldown remaining.
+- `/forcerunwatch` runs one watcher cycle immediately for the owner.
 
 ## Free Deployment Options
 

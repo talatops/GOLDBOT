@@ -19,21 +19,33 @@ NEWS_SOURCES: list[tuple[str, str]] = [
     ("InvestingMetals", "https://www.investing.com/rss/news_301.rss"),
 ]
 
+SIGNAL_NEWS_SOURCES: list[tuple[str, str]] = [
+    ("FXStreetNews", "https://www.fxstreet.com/rss/news"),
+    ("BullionStar", "https://www.bullionstar.com/rss/"),
+    ("GoldBroker", "https://www.goldbroker.com/en/news.rss"),
+]
+
 SOURCE_FALLBACK_LINKS: dict[str, str] = {
     "FXStreetNews": "https://www.fxstreet.com/news",
     "InvestingCommodities": "https://www.investing.com/commodities/",
     "InvestingMetals": "https://www.investing.com/news/commodities-news",
+    "BullionStar": "https://www.bullionstar.com/blogs/",
+    "GoldBroker": "https://www.goldbroker.com/en/news",
 }
 
 SOURCE_BASE_SCORES: dict[str, int] = {
     "FXStreetNews": 92,
     "InvestingCommodities": 84,
     "InvestingMetals": 80,
+    "BullionStar": 90,
+    "GoldBroker": 88,
 }
 
 REFERENCE_LINKS: list[tuple[str, str]] = [
     ("TradingView GOLD Chart", "https://www.tradingview.com/chart/?symbol=TVC%3AGOLD"),
 ]
+
+BLOCKED_CUSTOM_SOURCE_DOMAINS: tuple[str, ...] = ("dgcx.ae", "www.dgcx.ae")
 
 
 class NewsService:
@@ -44,22 +56,29 @@ class NewsService:
         self._last_source_health: dict[str, dict[str, str | int]] = {}
 
     async def fetch_and_cache_market_snapshot(
-        self, owner_user_id: int | None = None
+        self, owner_user_id: int | None = None, signal_only: bool = False
     ) -> list[dict[str, str | None]]:
-        news = await self._fetch_news_items(owner_user_id=owner_user_id)
+        news = await self._fetch_news_items(owner_user_id=owner_user_id, signal_only=signal_only)
         if news:
             self._db.add_news_items(news)
         return news
 
     async def get_top_news(
-        self, owner_user_id: int | None = None, limit: int = 5, since_iso: str | None = None
+        self,
+        owner_user_id: int | None = None,
+        limit: int = 5,
+        since_iso: str | None = None,
+        signal_only: bool = False,
     ) -> list[dict[str, str | None]]:
         if since_iso:
             news = self._db.get_news_since(since_iso=since_iso, limit=max(40, limit * 8))
         else:
             news = self._db.get_recent_news(limit=limit * 2)
         if not news:
-            news = await self.fetch_and_cache_market_snapshot(owner_user_id=owner_user_id)
+            news = await self.fetch_and_cache_market_snapshot(owner_user_id=owner_user_id, signal_only=signal_only)
+        if signal_only:
+            allowed = {name for name, _ in SIGNAL_NEWS_SOURCES}
+            news = [item for item in news if str(item.get("source") or "") in allowed]
         for item in news:
             source_name = str(item.get("source") or "Unknown")
             conf = int(item.get("source_confidence") or self._source_confidence(source_name))
@@ -93,8 +112,10 @@ class NewsService:
                 break
         return deduped[:limit]
 
-    async def build_market_context(self, owner_user_id: int | None = None, since_iso: str | None = None) -> str:
-        news = await self.get_top_news(owner_user_id=owner_user_id, limit=3, since_iso=since_iso)
+    async def build_market_context(
+        self, owner_user_id: int | None = None, since_iso: str | None = None, signal_only: bool = False
+    ) -> str:
+        news = await self.get_top_news(owner_user_id=owner_user_id, limit=3, since_iso=since_iso, signal_only=signal_only)
         price = await self.get_live_price_snapshot()
         price_line = (
             f"Live gold price snapshot: XAUUSD={price['price']} | change={price['change']} | "
@@ -103,7 +124,8 @@ class NewsService:
         window_line = f"Summary window start (UTC): {since_iso}" if since_iso else "Summary window: latest snapshot"
         if not news:
             return f"{price_line}\n{window_line}\nNo fresh gold headlines found."
-        lines = [price_line, window_line, "Top 3 fresh gold headlines (with source confidence):"]
+        header = "Top 3 reliable gold signal headlines:" if signal_only else "Top 3 fresh gold headlines (with source confidence):"
+        lines = [price_line, window_line, header]
         for idx, item in enumerate(news, start=1):
             title = str(item.get("title") or "Untitled")
             source = str(item.get("source") or "Source")
@@ -153,7 +175,10 @@ class NewsService:
             lines.append(f"- <a href=\"{url}\">{title}</a> ({source})")
             added_any = True
         if not added_any:
-            for source_name, source_url in NEWS_SOURCES:
+            fallback_sources = NEWS_SOURCES
+            if news_items and all(str(item.get("source") or "") in {name for name, _ in SIGNAL_NEWS_SOURCES} for item in news_items):
+                fallback_sources = SIGNAL_NEWS_SOURCES
+            for source_name, source_url in fallback_sources:
                 fallback_url = SOURCE_FALLBACK_LINKS.get(source_name, source_url)
                 lines.append(f"- <a href=\"{fallback_url}\">{_escape_html(source_name)}</a>")
         if REFERENCE_LINKS:
@@ -168,27 +193,7 @@ class NewsService:
         stooq_url = "https://stooq.com/q/l/?s=gc.f&f=sd2t2ohlcv&h&e=csv"
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                # Primary provider: Yahoo Finance futures quote
-                try:
-                    response = await client.get(yahoo_url, headers={"User-Agent": "Mozilla/5.0"})
-                    response.raise_for_status()
-                    data = response.json()
-                    quote = ((data.get("quoteResponse") or {}).get("result") or [{}])[0]
-                    price = quote.get("regularMarketPrice")
-                    change = quote.get("regularMarketChange")
-                    change_pct = quote.get("regularMarketChangePercent")
-                    if price is not None:
-                        return {
-                            "price": _fmt_num(price),
-                            "change": _fmt_num(change),
-                            "change_percent": _fmt_num(change_pct, suffix="%"),
-                            "source": "YahooFinance GC=F",
-                            "fallback_active": "false",
-                        }
-                except Exception:
-                    pass
-
-                # Fallback provider: Stooq futures CSV quote
+                # Primary provider: Stooq futures CSV quote (stable for this deployment).
                 try:
                     response = await client.get(stooq_url, headers={"User-Agent": "Mozilla/5.0"})
                     response.raise_for_status()
@@ -213,8 +218,28 @@ class NewsService:
                                 "change": _fmt_num(chg),
                                 "change_percent": _fmt_num(chg_pct, suffix="%"),
                                 "source": "Stooq GC.F",
-                                "fallback_active": "true",
+                                "fallback_active": "false",
                             }
+                except Exception:
+                    pass
+
+                # Fallback provider: Yahoo Finance futures quote
+                try:
+                    response = await client.get(yahoo_url, headers={"User-Agent": "Mozilla/5.0"})
+                    response.raise_for_status()
+                    data = response.json()
+                    quote = ((data.get("quoteResponse") or {}).get("result") or [{}])[0]
+                    price = quote.get("regularMarketPrice")
+                    change = quote.get("regularMarketChange")
+                    change_pct = quote.get("regularMarketChangePercent")
+                    if price is not None:
+                        return {
+                            "price": _fmt_num(price),
+                            "change": _fmt_num(change),
+                            "change_percent": _fmt_num(change_pct, suffix="%"),
+                            "source": "YahooFinance GC=F",
+                            "fallback_active": "true",
+                        }
                 except Exception:
                     pass
         except Exception:
@@ -227,14 +252,17 @@ class NewsService:
             "fallback_active": "true",
         }
 
-    async def _fetch_news_items(self, owner_user_id: int | None = None) -> list[dict[str, str | None]]:
+    async def _fetch_news_items(
+        self, owner_user_id: int | None = None, signal_only: bool = False
+    ) -> list[dict[str, str | None]]:
         custom_sources = self._db.list_custom_sources(owner_user_id=owner_user_id)
-        dynamic_sources: list[tuple[str, str]] = list(NEWS_SOURCES)
-        for entry in custom_sources:
-            source_name = str(entry.get("source_name") or "CustomSource")
-            source_url = str(entry.get("source_url") or "").strip()
-            if source_url:
-                dynamic_sources.append((source_name, source_url))
+        dynamic_sources: list[tuple[str, str]] = list(SIGNAL_NEWS_SOURCES if signal_only else NEWS_SOURCES)
+        if not signal_only:
+            for entry in custom_sources:
+                source_name = str(entry.get("source_name") or "CustomSource")
+                source_url = str(entry.get("source_url") or "").strip()
+                if source_url and not _is_blocked_custom_source(source_url):
+                    dynamic_sources.append((source_name, source_url))
 
         now = time.time()
         active_sources = [
@@ -383,6 +411,11 @@ class NewsService:
                 source_name = str(entry.get("source_name") or "CustomSource")
                 source_url = str(entry.get("source_url") or "").strip()
                 if not source_url:
+                    continue
+                if _is_blocked_custom_source(source_url):
+                    snippets.append(
+                        f"{source_name} ({source_url}): skipped by default because this domain blocks bot access."
+                    )
                     continue
                 try:
                     response = await client.get(source_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -569,5 +602,10 @@ def _extract_aed_price(text: str) -> str | None:
 def _looks_like_anti_bot(html: str) -> bool:
     lower = html.lower()
     return "just a moment" in lower or "cloudflare" in lower or "captcha" in lower
+
+
+def _is_blocked_custom_source(url: str) -> bool:
+    lowered = url.lower()
+    return any(domain in lowered for domain in BLOCKED_CUSTOM_SOURCE_DOMAINS)
 
 

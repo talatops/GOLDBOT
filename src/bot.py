@@ -23,8 +23,9 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-WATCH_INTERVAL = timedelta(minutes=10)
-ALERT_COOLDOWN = timedelta(hours=2)
+WATCH_INTERVAL = timedelta(hours=1)
+ALERT_COOLDOWN = timedelta(hours=24)
+PRICE_MOVE_THRESHOLD_PERCENT = 1.0
 
 async def on_error(update: object, context) -> None:
     update_id = None
@@ -56,6 +57,8 @@ async def register_commands(app: Application) -> None:
         BotCommand("removechannel", "Owner: remove channel from broadcasts"),
         BotCommand("listchannels", "Owner: list configured broadcast channels"),
         BotCommand("sendtest", "Owner: send test broadcast immediately"),
+        BotCommand("watchstatus", "Owner: show signal watcher status"),
+        BotCommand("forcerunwatch", "Owner: run one signal watcher cycle now"),
     ]
     try:
         await app.bot.set_my_commands(commands)
@@ -71,6 +74,8 @@ def build_application() -> Application:
     news_service = NewsService(db=db)
     groq_service = GroqService(
         api_key=settings.groq_api_key,
+        google_api_key=settings.google_api_key,
+        google_model=settings.google_model,
         openrouter_api_key=settings.openrouter_api_key,
         openrouter_model=settings.openrouter_model,
     )
@@ -83,14 +88,18 @@ def build_application() -> Application:
     app.bot_data["groq_service"] = groq_service
     app.bot_data["scheduler"] = scheduler
 
-    async def broadcast_news(force_send: bool = False) -> None:
+    async def broadcast_news(force_send: bool = False, include_headlines: bool = True) -> int:
         db.purge_expired_users()
-        await news_service.fetch_and_cache_market_snapshot()
-        top_news = await news_service.get_top_news(limit=5)
+        signal_only = not include_headlines
+        await news_service.fetch_and_cache_market_snapshot(signal_only=signal_only)
+        top_news = await news_service.get_top_news(limit=5, signal_only=signal_only)
         price = await news_service.get_live_price_snapshot()
-        headline_context = await news_service.build_headline_context()
-        headline_text = await groq_service.curate_headlines(headline_context=headline_context)
-        market_context = await news_service.build_market_context()
+        headline_message = ""
+        if include_headlines:
+            headline_context = await news_service.build_headline_context()
+            headline_text = await groq_service.curate_headlines(headline_context=headline_context)
+            headline_message = _to_html_headlines(headline_text)
+        market_context = await news_service.build_market_context(signal_only=signal_only)
         curated = await groq_service.curate_news_update(market_context=market_context)
         sources_html = news_service.build_sources_html(top_news)
         price_html = (
@@ -101,19 +110,19 @@ def build_application() -> Application:
             f"<a href=\"https://www.tradingview.com/chart/?symbol=TVC%3AGOLD\">Open TradingView GOLD Chart</a>"
         )
         final_message = f"{price_html}\n\n{_to_html_sections(curated)}\n\n{sources_html}"
-        headline_message = _to_html_headlines(headline_text)
         recipients = set(settings.bot_owner_ids)
         recipients.update(user.telegram_user_id for user in db.list_authorized_users())
         recipients.update(int(item["channel_id"]) for item in db.list_broadcast_channels())
         sent_count = 0
         for chat_id in recipients:
             try:
-                await app.bot.send_message(
-                    chat_id=chat_id,
-                    text=headline_message,
-                    disable_web_page_preview=True,
-                    parse_mode="HTML",
-                )
+                if include_headlines and headline_message:
+                    await app.bot.send_message(
+                        chat_id=chat_id,
+                        text=headline_message,
+                        disable_web_page_preview=True,
+                        parse_mode="HTML",
+                    )
                 await app.bot.send_message(
                     chat_id=chat_id,
                     text=final_message,
@@ -125,11 +134,103 @@ def build_application() -> Application:
                 logger.warning("Failed to broadcast to %s: %s", chat_id, exc)
         if sent_count > 0:
             db.set_last_broadcast_at(_utc_now_iso())
+        return sent_count
 
     scheduler.register_broadcast_callback(lambda: broadcast_news(force_send=False))
     app.bot_data["broadcast_callback"] = broadcast_news
     app.bot_data["watcher_interval_seconds"] = int(WATCH_INTERVAL.total_seconds())
     app.bot_data["watcher_cooldown_seconds"] = int(ALERT_COOLDOWN.total_seconds())
+
+    async def run_signal_watch_cycle(force_send: bool = False) -> dict[str, str | bool]:
+        cooldown_seconds = int(app.bot_data.get("watcher_cooldown_seconds", int(ALERT_COOLDOWN.total_seconds())))
+
+        await news_service.fetch_and_cache_market_snapshot(signal_only=True)
+        top_news = await news_service.get_top_news(limit=3, signal_only=True)
+        market_context = await news_service.build_market_context(signal_only=True)
+
+        curated = await groq_service.curate_news_update(market_context=market_context)
+        signal, confidence = _extract_signal_confidence(curated)
+        reason = _extract_reason(curated)
+        if _is_weak_reason(reason):
+            retry_text = await groq_service.curate_news_update(market_context=market_context)
+            retry_reason = _extract_reason(retry_text)
+            if not _is_weak_reason(retry_reason):
+                curated = retry_text
+                signal, confidence = _extract_signal_confidence(curated)
+                reason = retry_reason
+
+        should_fire = _should_trigger_signal_alert(signal=signal, confidence=confidence)
+        current_price = str((await news_service.get_live_price_snapshot()).get("price") or "n/a")
+        headlines_hash = _build_headlines_hash(top_news)
+        checked_at = _utc_now_iso()
+        watch_state = db.get_watch_state()
+        alert_state = db.get_last_alert_state()
+        db.set_watch_state(
+            checked_at=checked_at,
+            signal=signal,
+            confidence=confidence,
+            price=current_price,
+            headlines_hash=headlines_hash,
+        )
+
+        if not should_fire or _is_weak_reason(reason):
+            return {
+                "sent": False,
+                "signal": signal,
+                "confidence": confidence,
+                "decision": "trigger_not_met_or_reason_weak",
+            }
+
+        last_sent_signal = str(alert_state.get("signal") or "")
+        last_sent_at = str(alert_state.get("sent_at") or "")
+        last_price = str(alert_state.get("price") or "")
+        last_headlines_hash = str(alert_state.get("headlines_hash") or "")
+        signal_flipped = bool(last_sent_signal) and last_sent_signal != signal
+        no_previous_alert = not last_sent_at
+        material_change = force_send or no_previous_alert or signal_flipped or _price_moved_enough(last_price, current_price) or (
+            bool(last_headlines_hash) and last_headlines_hash != headlines_hash
+        )
+        if not material_change:
+            return {
+                "sent": False,
+                "signal": signal,
+                "confidence": confidence,
+                "decision": "no_material_change",
+            }
+
+        in_cooldown = False
+        if last_sent_at and not signal_flipped:
+            try:
+                last_dt = datetime.fromisoformat(last_sent_at)
+                in_cooldown = (datetime.now(timezone.utc) - last_dt).total_seconds() < cooldown_seconds
+            except Exception:
+                in_cooldown = False
+        if in_cooldown and not force_send:
+            return {
+                "sent": False,
+                "signal": signal,
+                "confidence": confidence,
+                "decision": "cooldown_active",
+            }
+
+        sent_count = await broadcast_news(force_send=True, include_headlines=False)
+        if sent_count:
+            db.set_last_alert_state(
+                signal_hash=_build_alert_hash(curated),
+                signal=signal,
+                confidence=confidence,
+                sent_at=_utc_now_iso(),
+                price=current_price,
+                headlines_hash=headlines_hash,
+            )
+        return {
+            "sent": bool(sent_count),
+            "signal": signal,
+            "confidence": confidence,
+            "decision": "sent" if sent_count else "send_failed",
+        }
+
+    app.bot_data["watch_cycle_callback"] = run_signal_watch_cycle
 
     # User commands
     app.add_handler(CommandHandler("start", user_handlers.start))
@@ -155,6 +256,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("removechannel", admin_handlers.remove_channel))
     app.add_handler(CommandHandler("listchannels", admin_handlers.list_channels))
     app.add_handler(CommandHandler("sendtest", admin_handlers.send_test))
+    app.add_handler(CommandHandler("watchstatus", admin_handlers.watch_status))
+    app.add_handler(CommandHandler("forcerunwatch", admin_handlers.force_run_watch))
     app.add_error_handler(on_error)
 
     return app
@@ -166,46 +269,17 @@ async def run() -> None:
     watcher_task: asyncio.Task | None = None
 
     async def signal_watcher_loop() -> None:
-        db: Database = app.bot_data["db"]
-        news_service: NewsService = app.bot_data["news_service"]
-        groq_service: GroqService = app.bot_data["groq_service"]
-        broadcast_cb = app.bot_data["broadcast_callback"]
-        interval_seconds = int(app.bot_data.get("watcher_interval_seconds", 600))
-        cooldown_seconds = int(app.bot_data.get("watcher_cooldown_seconds", 7200))
+        run_cycle = app.bot_data["watch_cycle_callback"]
+        interval_seconds = int(app.bot_data.get("watcher_interval_seconds", int(WATCH_INTERVAL.total_seconds())))
         while True:
             try:
-                await news_service.fetch_and_cache_market_snapshot()
-                market_context = await news_service.build_market_context()
-                curated = await groq_service.curate_news_update(market_context=market_context)
-                signal, confidence = _extract_signal_confidence(curated)
-                should_fire = _should_trigger_signal_alert(signal=signal, confidence=confidence)
-                if should_fire:
-                    state = db.get_last_alert_state()
-                    signal_hash = _build_alert_hash(curated)
-                    now = datetime.now(timezone.utc)
-                    last_hash = str(state.get("hash") or "")
-                    last_sent_at = str(state.get("sent_at") or "")
-                    in_cooldown = False
-                    if last_sent_at:
-                        try:
-                            last_dt = datetime.fromisoformat(last_sent_at)
-                            in_cooldown = (now - last_dt).total_seconds() < cooldown_seconds
-                        except Exception:
-                            in_cooldown = False
-                    if not in_cooldown:
-                        await broadcast_cb(force_send=True)
-                        sent_at = _utc_now_iso()
-                        db.set_last_alert_state(
-                            signal_hash=signal_hash,
-                            signal=signal,
-                            confidence=confidence,
-                            sent_at=sent_at,
-                        )
+                result = await run_cycle(force_send=False)
                 logger.info(
-                    "watcher_tick signal=%s confidence=%s trigger=%s",
-                    signal or "unknown",
-                    confidence or "unknown",
-                    should_fire,
+                    "watcher_tick signal=%s confidence=%s sent=%s decision=%s",
+                    str(result.get("signal") or "unknown"),
+                    str(result.get("confidence") or "unknown"),
+                    bool(result.get("sent")),
+                    str(result.get("decision") or "unknown"),
                 )
             except Exception as exc:
                 logger.warning("Signal watcher tick failed: %s", exc)
@@ -274,6 +348,12 @@ def _to_html_sections(text: str) -> str:
         ).strip()
         if free_text:
             reason = free_text
+
+    if reason and (
+        "showing raw website headlines instead" in reason.lower()
+        or "ai provider rejected the request" in reason.lower()
+    ):
+        reason = "AI analysis is temporarily unavailable, so signal remains conservative until the next successful evaluation."
 
     if not reason:
         text_blob = " ".join(lines)
@@ -346,7 +426,7 @@ def _extract_signal_confidence(text: str) -> tuple[str, str]:
 def _should_trigger_signal_alert(signal: str, confidence: str) -> bool:
     if signal == "BUY" and confidence == "High":
         return True
-    if signal == "SELL" and confidence in {"Low", "Medium"}:
+    if signal == "SELL" and confidence == "High":
         return True
     return False
 
@@ -354,6 +434,35 @@ def _should_trigger_signal_alert(signal: str, confidence: str) -> bool:
 def _build_alert_hash(curated_text: str) -> str:
     normalized = " ".join(curated_text.strip().lower().split())
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _build_headlines_hash(news_items: list[dict[str, str | None]]) -> str:
+    payload = " || ".join(str(item.get("title") or "").strip().lower() for item in news_items[:3])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest() if payload else ""
+
+
+def _extract_reason(text: str) -> str:
+    for line in text.splitlines():
+        clean = line.strip()
+        if clean.lower().startswith("reason:"):
+            return clean.split(":", 1)[1].strip()
+    return ""
+
+
+def _is_weak_reason(reason: str) -> bool:
+    normalized = " ".join(reason.strip().lower().split())
+    return not normalized or normalized in {"none", "n/a", "na"}
+
+
+def _price_moved_enough(last_price: str, current_price: str) -> bool:
+    try:
+        last_val = float(last_price.replace(",", ""))
+        current_val = float(current_price.replace(",", ""))
+        if last_val == 0:
+            return False
+        return abs((current_val - last_val) / last_val) * 100 >= PRICE_MOVE_THRESHOLD_PERCENT
+    except Exception:
+        return False
 
 
 def _utc_now_iso() -> str:

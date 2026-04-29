@@ -4,8 +4,17 @@ import httpx
 
 
 class GroqService:
-    def __init__(self, api_key: str, openrouter_api_key: str = "", openrouter_model: str = "openai/gpt-4o-mini") -> None:
+    def __init__(
+        self,
+        api_key: str,
+        google_api_key: str = "",
+        google_model: str = "gemini-2.0-flash-lite",
+        openrouter_api_key: str = "",
+        openrouter_model: str = "openai/gpt-4o-mini",
+    ) -> None:
         self._api_key = api_key
+        self._google_api_key = google_api_key
+        self._google_model = google_model
         self._openrouter_api_key = openrouter_api_key
         self._openrouter_model = openrouter_model
         self._url = "https://api.groq.com/openai/v1/chat/completions"
@@ -16,6 +25,8 @@ class GroqService:
         self._resolved_openrouter_free_model: str | None = None
 
     async def _resolve_model(self) -> str:
+        if self._google_api_key:
+            return self._google_model
         if self._openrouter_api_key:
             return self._openrouter_model
         if self._resolved_model:
@@ -51,8 +62,8 @@ class GroqService:
         return self._resolved_model
 
     async def answer(self, question: str, market_context: str) -> str:
-        if not self._api_key and not self._openrouter_api_key:
-            return "No AI key configured. Set GROQ_API_KEY or OPENROUTER_API_KEY in .env."
+        if not self._api_key and not self._openrouter_api_key and not self._google_api_key:
+            return "No AI key configured. Set GOOGLE_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in .env."
 
         system_prompt = (
             "You are a gold market assistant. "
@@ -95,8 +106,8 @@ class GroqService:
             )
 
     async def curate_news_update(self, market_context: str) -> str:
-        if not self._api_key and not self._openrouter_api_key:
-            return "No AI key configured. Set GROQ_API_KEY or OPENROUTER_API_KEY in .env."
+        if not self._api_key and not self._openrouter_api_key and not self._google_api_key:
+            return "No AI key configured. Set GOOGLE_API_KEY, GROQ_API_KEY, or OPENROUTER_API_KEY in .env."
 
         system_prompt = (
             "You are a professional gold market analyst. "
@@ -136,21 +147,24 @@ class GroqService:
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 402 and self._openrouter_api_key:
                 return (
-                    "OpenRouter model requires payment/credits. "
-                    "Showing raw website headlines instead."
+                    "Signal: HOLD\n"
+                    "Confidence: Low\n"
+                    "Reason: AI model quota is unavailable right now, so signal is held until the next successful analysis cycle."
                 )
             return (
-                "AI provider rejected the request. "
-                "Showing raw website headlines instead."
+                "Signal: HOLD\n"
+                "Confidence: Low\n"
+                "Reason: AI provider request failed, so signal is held until fresh analysis is available."
             )
         except Exception:
             return (
-                "I could not curate the market update right now. "
-                "Showing raw website headlines instead."
+                "Signal: HOLD\n"
+                "Confidence: Low\n"
+                "Reason: AI service is temporarily unreachable, so signal is held until the next successful run."
             )
 
     async def curate_news_summary(self, market_context: str) -> str:
-        if not self._api_key and not self._openrouter_api_key:
+        if not self._api_key and not self._openrouter_api_key and not self._google_api_key:
             return "Summary unavailable: AI key is not configured."
 
         system_prompt = (
@@ -185,7 +199,7 @@ class GroqService:
             return "Gold moved within the summary window based on available feeds; key catalysts were mixed across macro and geopolitical headlines."
 
     async def curate_headlines(self, headline_context: str) -> str:
-        if not self._api_key and not self._openrouter_api_key:
+        if not self._api_key and not self._openrouter_api_key and not self._google_api_key:
             return self._headline_backup_from_context(headline_context)
 
         system_prompt = (
@@ -219,6 +233,8 @@ class GroqService:
             return self._headline_backup_from_context(headline_context)
 
     def _headers(self) -> dict[str, str]:
+        if self._google_api_key:
+            return {"Content-Type": "application/json"}
         if self._openrouter_api_key:
             return {
                 "Authorization": f"Bearer {self._openrouter_api_key}",
@@ -232,15 +248,23 @@ class GroqService:
         }
 
     def _target_url(self) -> str:
+        if self._google_api_key:
+            model = self._google_model.replace("/", "%2F")
+            return (
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+                f"?key={self._google_api_key}"
+            )
         if self._openrouter_api_key:
             return self._openrouter_url
         return self._url
 
     async def _send_chat(self, payload: dict, headers: dict[str, str]) -> dict:
+        if self._google_api_key:
+            return await self._send_google_chat(payload=payload)
         target_url = self._target_url()
         async with httpx.AsyncClient(timeout=25.0) as client:
             response = await client.post(target_url, json=payload, headers=headers)
-            if response.status_code == 402 and self._openrouter_api_key:
+            if response.status_code in {402, 404} and self._openrouter_api_key:
                 free_model = await self._resolve_openrouter_free_model(headers=headers)
                 if free_model:
                     retry_payload = dict(payload)
@@ -250,6 +274,40 @@ class GroqService:
                     return retry.json()
             response.raise_for_status()
             return response.json()
+
+    async def _send_google_chat(self, payload: dict) -> dict:
+        system_prompt = ""
+        user_prompt = ""
+        for msg in payload.get("messages", []):
+            role = str(msg.get("role") or "").lower()
+            content = str(msg.get("content") or "")
+            if role == "system":
+                system_prompt = content
+            elif role == "user":
+                user_prompt = content
+        endpoint = self._target_url()
+        body = {
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "generationConfig": {"temperature": float(payload.get("temperature", 0.2))},
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(endpoint, json=body, headers={"Content-Type": "application/json"})
+            response.raise_for_status()
+            data = response.json()
+        text = ""
+        for cand in data.get("candidates", []):
+            parts = ((cand.get("content") or {}).get("parts") or [])
+            for part in parts:
+                maybe = str(part.get("text") or "").strip()
+                if maybe:
+                    text = maybe
+                    break
+            if text:
+                break
+        if not text:
+            raise ValueError("Google response did not include text content")
+        return {"choices": [{"message": {"content": text}}]}
 
     async def _resolve_openrouter_free_model(self, headers: dict[str, str]) -> str | None:
         if self._resolved_openrouter_free_model:

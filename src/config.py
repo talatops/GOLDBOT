@@ -12,6 +12,8 @@ class Settings:
     telegram_bot_token: str
     bot_owner_ids: tuple[int, ...]
     groq_api_key: str
+    google_api_key: str
+    google_model: str
     openrouter_api_key: str
     openrouter_model: str
     default_timezone: str
@@ -40,6 +42,7 @@ def load_settings() -> Settings:
     owner = os.getenv("BOT_OWNER_ID", "").strip()
     owners_csv = os.getenv("BOT_OWNER_IDS", "").strip()
     groq_key = os.getenv("GROQ_API_KEY", "").strip()
+    google_key = os.getenv("GOOGLE_API_KEY", "").strip()
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip()
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN is required.")
@@ -61,6 +64,8 @@ def load_settings() -> Settings:
         telegram_bot_token=token,
         bot_owner_ids=tuple(owner_ids),
         groq_api_key=groq_key,
+        google_api_key=google_key,
+        google_model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash-lite").strip(),
         openrouter_api_key=openrouter_key,
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip(),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", "UTC").strip(),

@@ -187,13 +187,53 @@ class Database:
             "signal": self.get_setting("last_alert_signal"),
             "confidence": self.get_setting("last_alert_confidence"),
             "sent_at": self.get_setting("last_alert_sent_at"),
+            "price": self.get_setting("last_alert_price"),
+            "headlines_hash": self.get_setting("last_alert_headlines_hash"),
         }
 
-    def set_last_alert_state(self, signal_hash: str, signal: str, confidence: str, sent_at: str) -> None:
+    def set_last_alert_state(
+        self,
+        signal_hash: str,
+        signal: str,
+        confidence: str,
+        sent_at: str,
+        price: str | None = None,
+        headlines_hash: str | None = None,
+    ) -> None:
         self.set_setting("last_alert_hash", signal_hash)
         self.set_setting("last_alert_signal", signal)
         self.set_setting("last_alert_confidence", confidence)
         self.set_setting("last_alert_sent_at", sent_at)
+        if price is not None:
+            self.set_setting("last_alert_price", price)
+        if headlines_hash is not None:
+            self.set_setting("last_alert_headlines_hash", headlines_hash)
+
+    def get_watch_state(self) -> dict[str, str | None]:
+        return {
+            "last_checked_at": self.get_setting("watch_last_checked_at"),
+            "last_signal": self.get_setting("watch_last_signal"),
+            "last_confidence": self.get_setting("watch_last_confidence"),
+            "last_price": self.get_setting("watch_last_price"),
+            "last_headlines_hash": self.get_setting("watch_last_headlines_hash"),
+            "last_sent_at": self.get_setting("last_alert_sent_at"),
+            "last_sent_signal": self.get_setting("last_alert_signal"),
+            "last_sent_confidence": self.get_setting("last_alert_confidence"),
+        }
+
+    def set_watch_state(
+        self,
+        checked_at: str,
+        signal: str,
+        confidence: str,
+        price: str,
+        headlines_hash: str,
+    ) -> None:
+        self.set_setting("watch_last_checked_at", checked_at)
+        self.set_setting("watch_last_signal", signal)
+        self.set_setting("watch_last_confidence", confidence)
+        self.set_setting("watch_last_price", price)
+        self.set_setting("watch_last_headlines_hash", headlines_hash)
 
     def add_news_items(self, items: Iterable[dict[str, str | None]]) -> None:
         now = self._now_iso()
