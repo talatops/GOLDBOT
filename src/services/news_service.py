@@ -22,7 +22,7 @@ NEWS_SOURCES: list[tuple[str, str]] = [
 SIGNAL_NEWS_SOURCES: list[tuple[str, str]] = [
     ("FXStreetNews", "https://www.fxstreet.com/rss/news"),
     ("BullionStar", "https://www.bullionstar.com/rss/"),
-    ("GoldBroker", "https://www.goldbroker.com/en/news.rss"),
+    ("GoldBroker", "https://goldbroker.com/news.rss"),
 ]
 
 SOURCE_FALLBACK_LINKS: dict[str, str] = {
