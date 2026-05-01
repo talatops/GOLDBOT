@@ -13,7 +13,6 @@ from telegram.ext import Application, CommandHandler
 from src.config import load_settings
 from src.handlers import admin as admin_handlers
 from src.handlers import user as user_handlers
-from src.services.groq_service import GroqService
 from src.services.news_service import NewsService
 from src.services.scheduler_service import SchedulerService
 from src.storage.db import Database
@@ -23,9 +22,9 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
-WATCH_INTERVAL = timedelta(hours=1)
+WATCH_INTERVAL = timedelta(seconds=45)
 ALERT_COOLDOWN = timedelta(hours=24)
-PRICE_MOVE_THRESHOLD_PERCENT = 1.0
+PRICE_MOVE_THRESHOLD_PERCENT = 0.03
 
 async def on_error(update: object, context) -> None:
     update_id = None
@@ -39,9 +38,6 @@ async def register_commands(app: Application) -> None:
         BotCommand("start", "Intro"),
         BotCommand("help", "Show help and command list"),
         BotCommand("myid", "Show your Telegram user ID"),
-        BotCommand("news", "Get latest gold market brief"),
-        BotCommand("headline", "Get top 3 headlines"),
-        BotCommand("ask", "Ask a custom market question"),
         BotCommand("addsite", "Add custom RSS/news website"),
         BotCommand("removesite", "Remove custom website"),
         BotCommand("listsites", "List your custom websites"),
@@ -71,13 +67,10 @@ def build_application() -> Application:
     db = Database(settings.database_path)
     db.set_setting("global_news_cron", db.get_setting("global_news_cron", settings.global_news_cron) or settings.global_news_cron)
 
-    news_service = NewsService(db=db)
-    groq_service = GroqService(
-        api_key=settings.groq_api_key,
-        google_api_key=settings.google_api_key,
-        google_model=settings.google_model,
-        openrouter_api_key=settings.openrouter_api_key,
-        openrouter_model=settings.openrouter_model,
+    news_service = NewsService(
+        db=db,
+        tradingview_symbol=settings.tradingview_symbol,
+        tradingview_auth_token=settings.tradingview_auth_token,
     )
     scheduler = SchedulerService(db=db, timezone_name=settings.default_timezone)
 
@@ -85,23 +78,10 @@ def build_application() -> Application:
     app.bot_data["settings"] = settings
     app.bot_data["db"] = db
     app.bot_data["news_service"] = news_service
-    app.bot_data["groq_service"] = groq_service
     app.bot_data["scheduler"] = scheduler
 
-    async def broadcast_news(force_send: bool = False, include_headlines: bool = True) -> int:
+    async def _broadcast_signal_message(signal: str, confidence: str, reason: str, price: dict[str, str]) -> int:
         db.purge_expired_users()
-        signal_only = not include_headlines
-        await news_service.fetch_and_cache_market_snapshot(signal_only=signal_only)
-        top_news = await news_service.get_top_news(limit=5, signal_only=signal_only)
-        price = await news_service.get_live_price_snapshot()
-        headline_message = ""
-        if include_headlines:
-            headline_context = await news_service.build_headline_context()
-            headline_text = await groq_service.curate_headlines(headline_context=headline_context)
-            headline_message = _to_html_headlines(headline_text)
-        market_context = await news_service.build_market_context(signal_only=signal_only)
-        curated = await groq_service.curate_news_update(market_context=market_context)
-        sources_html = news_service.build_sources_html(top_news)
         price_html = (
             f"<b>Live Price</b>\n"
             f"XAUUSD: <b>{price['price']}</b> | "
@@ -109,20 +89,19 @@ def build_application() -> Application:
             f"Source: {price['source']}\n"
             f"<a href=\"https://www.tradingview.com/chart/?symbol=TVC%3AGOLD\">Open TradingView GOLD Chart</a>"
         )
-        final_message = f"{price_html}\n\n{_to_html_sections(curated)}\n\n{sources_html}"
+        final_message = (
+            f"{price_html}\n\n"
+            "<b>Trade Signal</b>\n"
+            f"<b>Signal</b>: {_decorate_signal(signal)}\n"
+            f"<b>Confidence</b>: {confidence}\n"
+            f"<b>Reason</b>: {reason}"
+        )
         recipients = set(settings.bot_owner_ids)
         recipients.update(user.telegram_user_id for user in db.list_authorized_users())
         recipients.update(int(item["channel_id"]) for item in db.list_broadcast_channels())
         sent_count = 0
         for chat_id in recipients:
             try:
-                if include_headlines and headline_message:
-                    await app.bot.send_message(
-                        chat_id=chat_id,
-                        text=headline_message,
-                        disable_web_page_preview=True,
-                        parse_mode="HTML",
-                    )
                 await app.bot.send_message(
                     chat_id=chat_id,
                     text=final_message,
@@ -136,104 +115,91 @@ def build_application() -> Application:
             db.set_last_broadcast_at(_utc_now_iso())
         return sent_count
 
+    async def broadcast_news(force_send: bool = False, include_headlines: bool = True) -> int:
+        del include_headlines  # no headline/news mode in no-AI watcher design
+        result = await run_signal_watch_cycle(force_send=True if force_send else False)
+        return 1 if result.get("sent") else 0
+
     scheduler.register_broadcast_callback(lambda: broadcast_news(force_send=False))
     app.bot_data["broadcast_callback"] = broadcast_news
     app.bot_data["watcher_interval_seconds"] = int(WATCH_INTERVAL.total_seconds())
-    app.bot_data["watcher_cooldown_seconds"] = int(ALERT_COOLDOWN.total_seconds())
 
     async def run_signal_watch_cycle(force_send: bool = False) -> dict[str, str | bool]:
-        cooldown_seconds = int(app.bot_data.get("watcher_cooldown_seconds", int(ALERT_COOLDOWN.total_seconds())))
-
-        await news_service.fetch_and_cache_market_snapshot(signal_only=True)
-        top_news = await news_service.get_top_news(limit=3, signal_only=True)
-        market_context = await news_service.build_market_context(signal_only=True)
-
-        curated = await groq_service.curate_news_update(market_context=market_context)
-        signal, confidence = _extract_signal_confidence(curated)
-        reason = _extract_reason(curated)
-        if _is_weak_reason(reason):
-            retry_text = await groq_service.curate_news_update(market_context=market_context)
-            retry_reason = _extract_reason(retry_text)
-            if not _is_weak_reason(retry_reason):
-                curated = retry_text
-                signal, confidence = _extract_signal_confidence(curated)
-                reason = retry_reason
-
         price_snapshot = await news_service.get_live_price_snapshot()
         current_price = str(price_snapshot.get("price") or "n/a")
-        signal, confidence = _apply_signal_validation(
-            signal=signal,
-            confidence=confidence,
-            change_percent=str(price_snapshot.get("change_percent") or ""),
-        )
-        should_fire = _should_trigger_signal_alert(signal=signal, confidence=confidence)
-        headlines_hash = _build_headlines_hash(top_news)
-        checked_at = _utc_now_iso()
         watch_state = db.get_watch_state()
+        prev_price = str(watch_state.get("last_price") or "")
+        delta, delta_pct = _compute_delta(prev_price=prev_price, current_price=current_price)
+        rule_result, signal, confidence, reason = _deterministic_signal_from_delta(
+            delta_percent=delta_pct,
+            prev_price=prev_price,
+            current_price=current_price,
+            previous_signal=str(watch_state.get("last_signal") or ""),
+            force_send=force_send,
+        )
+
+        diagnostics = await _build_indicator_diagnostics(
+            news_service=news_service,
+            timeframes=settings.signal_confirm_timeframes,
+            ema_fast_period=settings.signal_ema_fast,
+            ema_slow_period=settings.signal_ema_slow,
+            atr_period=settings.signal_atr_period,
+            min_atr_pct=settings.signal_min_atr_pct,
+            signal=signal,
+        )
+        should_fire = rule_result in {"BUY", "SELL"}
+        decision_label = "threshold_signal"
+        checked_at = _utc_now_iso()
         alert_state = db.get_last_alert_state()
         db.set_watch_state(
             checked_at=checked_at,
             signal=signal,
             confidence=confidence,
             price=current_price,
-            headlines_hash=headlines_hash,
+            prev_price=prev_price,
+            delta=f"{delta:.2f}" if delta is not None else "n/a",
+            delta_percent=f"{delta_pct:.2f}" if delta_pct is not None else "n/a",
+            rule_result=rule_result,
+            ema_fast=str(diagnostics.get("ema_fast") or "n/a"),
+            ema_slow=str(diagnostics.get("ema_slow") or "n/a"),
+            atr=str(diagnostics.get("atr_pct") or "n/a"),
+            filter_pass="true" if bool(diagnostics.get("filters_pass")) else "false",
+            filter_reason=str(diagnostics.get("filter_reason") or "n/a"),
+            timeframe_summary=str(diagnostics.get("timeframes") or "n/a"),
         )
 
-        if not should_fire or _is_weak_reason(reason):
+        if not should_fire:
             return {
                 "sent": False,
                 "signal": signal,
                 "confidence": confidence,
-                "decision": "trigger_not_met_or_reason_weak",
+                "decision": decision_label,
+                "rule_result": rule_result,
+                "delta_percent": f"{delta_pct:.4f}" if delta_pct is not None else "n/a",
+                "reason": reason,
             }
 
-        last_sent_signal = str(alert_state.get("signal") or "")
-        last_sent_at = str(alert_state.get("sent_at") or "")
-        last_price = str(alert_state.get("price") or "")
-        last_headlines_hash = str(alert_state.get("headlines_hash") or "")
-        signal_flipped = bool(last_sent_signal) and last_sent_signal != signal
-        no_previous_alert = not last_sent_at
-        material_change = force_send or no_previous_alert or signal_flipped or _price_moved_enough(last_price, current_price) or (
-            bool(last_headlines_hash) and last_headlines_hash != headlines_hash
-        )
-        if not material_change:
-            return {
-                "sent": False,
-                "signal": signal,
-                "confidence": confidence,
-                "decision": "no_material_change",
-            }
+        # Threshold-only mode: send every cycle.
+        del alert_state
 
-        in_cooldown = False
-        if last_sent_at and not signal_flipped:
-            try:
-                last_dt = datetime.fromisoformat(last_sent_at)
-                in_cooldown = (datetime.now(timezone.utc) - last_dt).total_seconds() < cooldown_seconds
-            except Exception:
-                in_cooldown = False
-        if in_cooldown and not force_send:
-            return {
-                "sent": False,
-                "signal": signal,
-                "confidence": confidence,
-                "decision": "cooldown_active",
-            }
-
-        sent_count = await broadcast_news(force_send=True, include_headlines=False)
+        sent_count = await _broadcast_signal_message(signal=signal, confidence=confidence, reason=reason, price=price_snapshot)
         if sent_count:
             db.set_last_alert_state(
-                signal_hash=_build_alert_hash(curated),
+                signal_hash=_build_alert_hash(f"{signal}|{confidence}|{reason}|{current_price}|{delta_pct}"),
                 signal=signal,
                 confidence=confidence,
                 sent_at=_utc_now_iso(),
                 price=current_price,
-                headlines_hash=headlines_hash,
+                headlines_hash="",
             )
         return {
             "sent": bool(sent_count),
             "signal": signal,
             "confidence": confidence,
             "decision": "sent" if sent_count else "send_failed",
+            "rule_result": rule_result,
+            "delta_percent": f"{delta_pct:.4f}" if delta_pct is not None else "n/a",
+            "reason": reason,
         }
 
     app.bot_data["watch_cycle_callback"] = run_signal_watch_cycle
@@ -242,9 +208,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", user_handlers.start))
     app.add_handler(CommandHandler("help", user_handlers.help_command))
     app.add_handler(CommandHandler("myid", user_handlers.my_id))
-    app.add_handler(CommandHandler("headline", user_handlers.headline))
-    app.add_handler(CommandHandler("news", user_handlers.news))
-    app.add_handler(CommandHandler("ask", user_handlers.ask))
     app.add_handler(CommandHandler("addsite", user_handlers.add_site))
     app.add_handler(CommandHandler("removesite", user_handlers.remove_site))
     app.add_handler(CommandHandler("listsites", user_handlers.list_sites))
@@ -281,11 +244,14 @@ async def run() -> None:
             try:
                 result = await run_cycle(force_send=False)
                 logger.info(
-                    "watcher_tick signal=%s confidence=%s sent=%s decision=%s",
+                    "watcher_tick signal=%s confidence=%s sent=%s decision=%s rule=%s delta_pct=%s reason=%s",
                     str(result.get("signal") or "unknown"),
                     str(result.get("confidence") or "unknown"),
                     bool(result.get("sent")),
                     str(result.get("decision") or "unknown"),
+                    str(result.get("rule_result") or "unknown"),
+                    str(result.get("delta_percent") or "n/a"),
+                    str(result.get("reason") or "n/a"),
                 )
             except Exception as exc:
                 logger.warning("Signal watcher tick failed: %s", exc)
@@ -503,6 +469,185 @@ def _parse_percent(value: str) -> float | None:
         return float(clean)
     except Exception:
         return None
+
+
+def _compute_delta(prev_price: str, current_price: str) -> tuple[float | None, float | None]:
+    try:
+        previous = float(prev_price.replace(",", ""))
+        current = float(current_price.replace(",", ""))
+        if previous == 0:
+            return None, None
+        delta = current - previous
+        delta_pct = (delta / previous) * 100
+        return delta, delta_pct
+    except Exception:
+        return None, None
+
+
+async def _build_indicator_diagnostics(
+    news_service: NewsService,
+    timeframes: tuple[str, ...],
+    ema_fast_period: int,
+    ema_slow_period: int,
+    atr_period: int,
+    min_atr_pct: float,
+    signal: str,
+) -> dict[str, str | float | bool]:
+    tf_results: list[dict[str, str | float | bool]] = []
+    for tf in timeframes:
+        candles = await news_service.get_tradingview_ohlc(tf, limit=max(ema_slow_period + 5, atr_period + 5, 40))
+        close_vals = [_to_float_or_none(c.get("close")) for c in candles]
+        high_vals = [_to_float_or_none(c.get("high")) for c in candles]
+        low_vals = [_to_float_or_none(c.get("low")) for c in candles]
+        close = [v for v in close_vals if v is not None]
+        high = [v for v in high_vals if v is not None]
+        low = [v for v in low_vals if v is not None]
+        if len(close) < 3 or len(high) < 3 or len(low) < 3:
+            latest_close = close[-1] if close else None
+            tf_results.append(
+                {
+                    "timeframe": tf,
+                    "ok": False,
+                    "reason": "insufficient_candles",
+                    "ema_fast": latest_close,
+                    "ema_slow": latest_close,
+                    "atr_pct": 0.0,
+                }
+            )
+            continue
+
+        fast_period = min(max(2, ema_fast_period), len(close))
+        slow_period = min(max(fast_period, ema_slow_period), len(close))
+        atr_window = min(max(2, atr_period), max(2, len(close) - 1))
+
+        ema_fast = _ema(close, fast_period)
+        ema_slow = _ema(close, slow_period)
+        atr = _atr(high, low, close, atr_window)
+        latest_close = close[-1]
+        atr_pct = (atr / latest_close) * 100 if atr is not None and latest_close else 0.0
+        structure = _structure_bias(close[-4:] if len(close) >= 4 else close)
+
+        trend_ok = bool(ema_fast is not None and ema_slow is not None and ((signal == "BUY" and ema_fast > ema_slow) or (signal == "SELL" and ema_fast < ema_slow)))
+        atr_ok = bool(atr_pct >= min_atr_pct)
+        structure_ok = (signal == "BUY" and structure in {"bullish", "neutral"}) or (signal == "SELL" and structure in {"bearish", "neutral"})
+        ok = trend_ok and atr_ok and structure_ok
+        reason_parts = []
+        if not trend_ok:
+            reason_parts.append("ema_trend_mismatch")
+        if not atr_ok:
+            reason_parts.append("atr_too_low")
+        if not structure_ok:
+            reason_parts.append("structure_conflict")
+        tf_results.append(
+            {
+                "timeframe": tf,
+                "ok": ok,
+                "reason": ",".join(reason_parts) if reason_parts else ("ok" if len(close) >= ema_slow_period + 2 else "warmup_ok"),
+                "ema_fast": ema_fast,
+                "ema_slow": ema_slow,
+                "atr_pct": atr_pct,
+            }
+        )
+
+    valid = [row for row in tf_results if row.get("ema_fast") is not None]
+    filters_pass = bool(valid) and all(bool(row.get("ok")) for row in valid)
+    primary = valid[0] if valid else {}
+    failures = [str(row.get("timeframe")) + ":" + str(row.get("reason")) for row in tf_results if not bool(row.get("ok"))]
+    filter_reason = "ok" if filters_pass else (";".join(failures) if failures else "insufficient_indicator_data")
+    reason_text = (
+        f"Signal withheld: confirmation filters failed ({filter_reason}). "
+        f"Need EMA alignment, ATR >= {min_atr_pct:.2f}%, and supportive structure."
+    )
+    return {
+        "filters_pass": filters_pass,
+        "filter_reason": filter_reason,
+        "reason_text": reason_text,
+        "ema_fast": _fmt_opt(primary.get("ema_fast")),
+        "ema_slow": _fmt_opt(primary.get("ema_slow")),
+        "atr_pct": _fmt_opt(primary.get("atr_pct")),
+        "timeframes": ",".join(str(row.get("timeframe")) for row in tf_results),
+    }
+
+
+def _ema(values: list[float], period: int) -> float | None:
+    if len(values) < period or period <= 1:
+        return None
+    k = 2 / (period + 1)
+    ema_val = sum(values[:period]) / period
+    for price in values[period:]:
+        ema_val = (price * k) + (ema_val * (1 - k))
+    return ema_val
+
+
+def _atr(high: list[float], low: list[float], close: list[float], period: int) -> float | None:
+    if len(high) != len(low) or len(low) != len(close) or len(close) < period + 1:
+        return None
+    trs: list[float] = []
+    for i in range(1, len(close)):
+        tr = max(high[i] - low[i], abs(high[i] - close[i - 1]), abs(low[i] - close[i - 1]))
+        trs.append(tr)
+    if len(trs) < period:
+        return None
+    return sum(trs[-period:]) / period
+
+
+def _structure_bias(values: list[float]) -> str:
+    if len(values) < 3:
+        return "neutral"
+    if values[-1] > values[-2] > values[-3]:
+        return "bullish"
+    if values[-1] < values[-2] < values[-3]:
+        return "bearish"
+    return "neutral"
+
+
+def _to_float_or_none(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _fmt_opt(value: object) -> str:
+    maybe = _to_float_or_none(value)
+    return f"{maybe:.4f}" if maybe is not None else "n/a"
+
+
+def _deterministic_signal_from_delta(
+    delta_percent: float | None,
+    prev_price: str,
+    current_price: str,
+    previous_signal: str,
+    force_send: bool,
+) -> tuple[str, str, str, str]:
+    del force_send
+    if delta_percent is not None:
+        if delta_percent >= PRICE_MOVE_THRESHOLD_PERCENT:
+            reason = (
+                f"Signal engine detected strengthening bullish momentum as price moved from {prev_price or 'n/a'} to {current_price} "
+                f"({delta_percent:.2f}%). BUY bias is active while upside pressure remains dominant."
+            )
+            return "BUY", "BUY", "High", reason
+        if delta_percent <= -PRICE_MOVE_THRESHOLD_PERCENT:
+            reason = (
+                f"Signal engine detected increasing bearish momentum as price moved from {prev_price or 'n/a'} to {current_price} "
+                f"({delta_percent:.2f}%). SELL bias is active while downside pressure remains dominant."
+            )
+            return "SELL", "SELL", "Medium", reason
+        signal = previous_signal.upper().strip() if previous_signal.upper().strip() in {"BUY", "SELL"} else "BUY"
+        confidence = "High" if signal == "BUY" else "Medium"
+        reason = (
+            f"Price moved {delta_percent:.2f}% from {prev_price or 'n/a'} to {current_price}, "
+            "and momentum remains mixed, so no fresh directional signal is issued yet."
+        )
+        return "NO_SIGNAL", signal, confidence, reason
+
+    signal = "BUY"
+    confidence = "High"
+    reason = "Previous comparison price is unavailable, so no fresh momentum signal is generated until two consecutive prices are available."
+    return "NO_SIGNAL", signal, confidence, reason
 
 
 def _price_moved_enough(last_price: str, current_price: str) -> bool:

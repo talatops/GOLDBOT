@@ -49,11 +49,14 @@ BLOCKED_CUSTOM_SOURCE_DOMAINS: tuple[str, ...] = ("dgcx.ae", "www.dgcx.ae")
 
 
 class NewsService:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, tradingview_symbol: str = "TVC:GOLD", tradingview_auth_token: str = "") -> None:
         self._db = db
+        self._tradingview_symbol = tradingview_symbol
+        self._tradingview_auth_token = tradingview_auth_token
         self._source_fail_counts: dict[str, int] = {}
         self._source_muted_until: dict[str, float] = {}
         self._last_source_health: dict[str, dict[str, str | int]] = {}
+        self._tv_ohlc_cache: dict[str, list[dict[str, str | float | int]]] = {}
 
     async def fetch_and_cache_market_snapshot(
         self, owner_user_id: int | None = None, signal_only: bool = False
@@ -191,9 +194,39 @@ class NewsService:
     async def get_live_price_snapshot(self) -> dict[str, str]:
         yahoo_url = "https://query1.finance.yahoo.com/v7/finance/quote?symbols=GC%3DF"
         stooq_url = "https://stooq.com/q/l/?s=gc.f&f=sd2t2ohlcv&h&e=csv"
+        tv_url = "https://scanner.tradingview.com/global/scan"
         try:
             async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                # Primary provider: Stooq futures CSV quote (stable for this deployment).
+                # Primary provider: TradingView scanner endpoint (unofficial/public style).
+                try:
+                    tv_headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+                    if self._tradingview_auth_token:
+                        tv_headers["Cookie"] = f"sessionid={self._tradingview_auth_token}"
+                    payload = {
+                        "symbols": {"tickers": [self._tradingview_symbol], "query": {"types": []}},
+                        "columns": ["close", "change", "change_abs"],
+                    }
+                    response = await client.post(tv_url, json=payload, headers=tv_headers)
+                    response.raise_for_status()
+                    data = response.json()
+                    rows = data.get("data") or []
+                    if rows:
+                        d = rows[0].get("d") or []
+                        close_num = _to_float(d[0] if len(d) > 0 else None)
+                        chg_pct = _to_float(d[1] if len(d) > 1 else None)
+                        chg = _to_float(d[2] if len(d) > 2 else None)
+                        if close_num is not None:
+                            return {
+                                "price": _fmt_num(close_num),
+                                "change": _fmt_num(chg),
+                                "change_percent": _fmt_num(chg_pct, suffix="%"),
+                                "source": f"TradingView {self._tradingview_symbol}",
+                                "fallback_active": "false",
+                            }
+                except Exception:
+                    pass
+
+                # Fallback provider: Stooq futures CSV quote (stable for this deployment).
                 try:
                     response = await client.get(stooq_url, headers={"User-Agent": "Mozilla/5.0"})
                     response.raise_for_status()
@@ -218,7 +251,7 @@ class NewsService:
                                 "change": _fmt_num(chg),
                                 "change_percent": _fmt_num(chg_pct, suffix="%"),
                                 "source": "Stooq GC.F",
-                                "fallback_active": "false",
+                                "fallback_active": "true",
                             }
                 except Exception:
                     pass
@@ -251,6 +284,68 @@ class NewsService:
             "source": "price_unavailable",
             "fallback_active": "true",
         }
+
+    async def get_tradingview_ohlc(
+        self, timeframe: str, limit: int = 120
+    ) -> list[dict[str, str | float | int]]:
+        tf = timeframe.strip().lower()
+        tf_suffix = _tv_timeframe_suffix(tf)
+        if tf_suffix is None:
+            return []
+
+        tv_url = "https://scanner.tradingview.com/global/scan"
+        columns = [f"open|{tf_suffix}", f"high|{tf_suffix}", f"low|{tf_suffix}", f"close|{tf_suffix}", f"volume|{tf_suffix}"]
+        headers = {"User-Agent": "Mozilla/5.0", "Content-Type": "application/json"}
+        if self._tradingview_auth_token:
+            headers["Cookie"] = f"sessionid={self._tradingview_auth_token}"
+        payload = {
+            "symbols": {"tickers": [self._tradingview_symbol], "query": {"types": []}},
+            "columns": columns,
+        }
+
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.post(tv_url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+        rows = data.get("data") or []
+        if not rows:
+            return self._tv_ohlc_cache.get(tf, [])[-limit:]
+
+        values = rows[0].get("d") or []
+        if len(values) < 4:
+            return self._tv_ohlc_cache.get(tf, [])[-limit:]
+
+        open_val = _to_float(values[0])
+        high_val = _to_float(values[1])
+        low_val = _to_float(values[2])
+        close_val = _to_float(values[3])
+        volume_val = _to_float(values[4] if len(values) > 4 else None)
+        if close_val is None:
+            return self._tv_ohlc_cache.get(tf, [])[-limit:]
+
+        now = datetime.now(timezone.utc)
+        bucket_seconds = _tv_bucket_seconds(tf)
+        bucket_ts = int(now.timestamp() // bucket_seconds * bucket_seconds)
+        cache = self._tv_ohlc_cache.setdefault(tf, [])
+        if cache and int(cache[-1].get("timestamp") or 0) == bucket_ts:
+            existing = cache[-1]
+            existing["high"] = max(float(existing.get("high") or close_val), high_val if high_val is not None else close_val)
+            existing["low"] = min(float(existing.get("low") or close_val), low_val if low_val is not None else close_val)
+            existing["close"] = close_val
+            existing["volume"] = float(existing.get("volume") or 0.0) + (volume_val or 0.0)
+        else:
+            candle = {
+                "timestamp": bucket_ts,
+                "open": open_val if open_val is not None else close_val,
+                "high": high_val if high_val is not None else close_val,
+                "low": low_val if low_val is not None else close_val,
+                "close": close_val,
+                "volume": volume_val or 0.0,
+            }
+            cache.append(candle)
+            if len(cache) > max(limit, 300):
+                del cache[: len(cache) - max(limit, 300)]
+        return cache[-limit:]
 
     async def _fetch_news_items(
         self, owner_user_id: int | None = None, signal_only: bool = False
@@ -607,5 +702,25 @@ def _looks_like_anti_bot(html: str) -> bool:
 def _is_blocked_custom_source(url: str) -> bool:
     lowered = url.lower()
     return any(domain in lowered for domain in BLOCKED_CUSTOM_SOURCE_DOMAINS)
+
+
+def _tv_timeframe_suffix(timeframe: str) -> str | None:
+    mapping = {
+        "1m": "1",
+        "5m": "5",
+        "15m": "15",
+        "1h": "60",
+    }
+    return mapping.get(timeframe.lower().strip())
+
+
+def _tv_bucket_seconds(timeframe: str) -> int:
+    mapping = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "1h": 3600,
+    }
+    return mapping.get(timeframe.lower().strip(), 60)
 
 

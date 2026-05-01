@@ -215,6 +215,16 @@ class Database:
             "last_signal": self.get_setting("watch_last_signal"),
             "last_confidence": self.get_setting("watch_last_confidence"),
             "last_price": self.get_setting("watch_last_price"),
+            "last_prev_price": self.get_setting("watch_last_prev_price"),
+            "last_delta": self.get_setting("watch_last_delta"),
+            "last_delta_percent": self.get_setting("watch_last_delta_percent"),
+            "last_rule_result": self.get_setting("watch_last_rule_result"),
+            "last_ema_fast": self.get_setting("watch_last_ema_fast"),
+            "last_ema_slow": self.get_setting("watch_last_ema_slow"),
+            "last_atr": self.get_setting("watch_last_atr"),
+            "last_filter_pass": self.get_setting("watch_last_filter_pass"),
+            "last_filter_reason": self.get_setting("watch_last_filter_reason"),
+            "last_timeframes": self.get_setting("watch_last_timeframes"),
             "last_headlines_hash": self.get_setting("watch_last_headlines_hash"),
             "last_sent_at": self.get_setting("last_alert_sent_at"),
             "last_sent_signal": self.get_setting("last_alert_signal"),
@@ -227,12 +237,32 @@ class Database:
         signal: str,
         confidence: str,
         price: str,
-        headlines_hash: str,
+        headlines_hash: str = "",
+        prev_price: str = "",
+        delta: str = "",
+        delta_percent: str = "",
+        rule_result: str = "",
+        ema_fast: str = "",
+        ema_slow: str = "",
+        atr: str = "",
+        filter_pass: str = "",
+        filter_reason: str = "",
+        timeframe_summary: str = "",
     ) -> None:
         self.set_setting("watch_last_checked_at", checked_at)
         self.set_setting("watch_last_signal", signal)
         self.set_setting("watch_last_confidence", confidence)
         self.set_setting("watch_last_price", price)
+        self.set_setting("watch_last_prev_price", prev_price)
+        self.set_setting("watch_last_delta", delta)
+        self.set_setting("watch_last_delta_percent", delta_percent)
+        self.set_setting("watch_last_rule_result", rule_result)
+        self.set_setting("watch_last_ema_fast", ema_fast)
+        self.set_setting("watch_last_ema_slow", ema_slow)
+        self.set_setting("watch_last_atr", atr)
+        self.set_setting("watch_last_filter_pass", filter_pass)
+        self.set_setting("watch_last_filter_reason", filter_reason)
+        self.set_setting("watch_last_timeframes", timeframe_summary)
         self.set_setting("watch_last_headlines_hash", headlines_hash)
 
     def add_news_items(self, items: Iterable[dict[str, str | None]]) -> None:

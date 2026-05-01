@@ -1,17 +1,16 @@
-# Telegram Gold News Bot
+# Telegram Gold Signal Bot
 
 Python Telegram bot with:
 - temporary access permissions managed by owner
-- one global scheduled gold market digest
-- event-driven signal watcher that can post automatically
-- Groq-powered custom Q&A
+- one global scheduled signal broadcast
+- event-driven contrarian watcher that posts automatically
+- deterministic non-AI signal reasoning
 
 ## Features
 - Owner can grant user access for hours or days.
-- Authorized users can request latest gold digest using hardcoded sources.
+- Deterministic signal generation from live price math (no AI dependency).
 - Owner can configure one global cron schedule for periodic broadcast.
-- Bot runs a 1-hour signal watcher and auto-posts only on meaningful high-confidence signal changes.
-- Authorized users can ask market questions with Groq-generated responses.
+- Bot runs a 30-second watcher and sends contrarian alerts on threshold crosses.
 - Authorized users can add/remove their own custom RSS/news websites via slash commands.
 
 ## Hardcoded Gold Sources
@@ -22,9 +21,7 @@ Python Telegram bot with:
 - Market reference:
   - TradingView GOLD Chart
 
-Note: TradingView is used as a clickable chart reference in messages. Live numeric price is fetched from API-accessible sources (Yahoo primary, Stooq fallback).
-
-The bot uses website feeds plus Groq curation. If one source fails, it falls back to available sources and cached data.
+Note: TradingView is used as primary price source via an unofficial scanner endpoint. Stooq is fallback.
 
 ## Setup
 1. Create a virtual environment and install dependencies:
@@ -50,18 +47,15 @@ The bot uses website feeds plus Groq curation. If one source fails, it falls bac
 8. Verify token quickly:
    - Open `https://api.telegram.org/bot<YOUR_TOKEN>/getMe`
 
-## Getting API Keys
+## Price Source Setup
+Set these in `.env`:
+- `TRADINGVIEW_SYMBOL` (default `TVC:GOLD`)
+- optional `TRADINGVIEW_AUTH_TOKEN` for private/session-backed access
+- `SIGNAL_EMA_FAST` and `SIGNAL_EMA_SLOW` for trend filter
+- `SIGNAL_ATR_PERIOD` and `SIGNAL_MIN_ATR_PCT` for volatility filter
+- `SIGNAL_CONFIRM_TIMEFRAMES` (example `5m,15m`) for confirmation windows
 
-### Groq / OpenRouter
-1. Create account at [Groq Console](https://console.groq.com/).
-2. Create API key.
-3. Set `GROQ_API_KEY` in `.env`.
-4. Model is auto-selected by the bot from available Groq models.
-5. Alternative: use OpenRouter by setting:
-   - `OPENROUTER_API_KEY`
-   - `OPENROUTER_MODEL` (example: `meta-llama/llama-3.1-8b-instruct:free`)
-
-No separate gold price API key is required in this mode.
+No AI key is required for signal generation in this mode.
 
 ## Commands
 
@@ -82,28 +76,24 @@ No separate gold price API key is required in this mode.
 - `/forcerunwatch`
 
 ### Authorized users
-- `/headline`
-- `/news` (summary window is since last successful broadcast checkpoint)
-- `/ask <question>`
 - `/addsite <url> [name]`
 - `/removesite <url>`
 - `/listsites`
 
 ## Dynamic Signal Posting (24/7)
-- A background watcher checks market/news every 1 hour.
-- Auto-post trigger rule:
-  - `BUY + High`, or
-  - `SELL + High`
-- Extra send gate:
-  - signal flipped from previous alert, or
-  - gold moved at least 1%, or
-  - top signal headlines changed meaningfully
+- A background watcher checks price every 30 seconds.
+- Contrarian trigger rule:
+  - price move `>= +0.05%` from previous check => `BUY` (confidence `High`)
+  - price move `<= -0.05%` from previous check => `SELL` (confidence `Medium`)
+  - in-band moves do not trigger auto alerts
+- Confirmation filters (confirmed-only sends):
+  - EMA fast/slow alignment on configured timeframes
+  - ATR% above configured minimum
+  - structure check not opposing the trigger side
+- If base trigger fires but filters fail, alert is skipped and details are visible in `/watchstatus`.
 - Cooldown:
   - 24 hours
   - bypassed only when the signal flips side
-- Weak AI output protection:
-  - if `Reason` is empty/weak, the bot retries once
-  - if still weak, it skips the alert instead of sending a bad signal
 - `/watchstatus` shows last check, last signal, last sent time, next check, and cooldown remaining.
 - `/forcerunwatch` runs one watcher cycle immediately for the owner.
 

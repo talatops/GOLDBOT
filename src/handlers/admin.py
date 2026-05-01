@@ -199,15 +199,24 @@ async def send_test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db: Database = context.application.bot_data["db"]
     interval_seconds = int(context.application.bot_data.get("watcher_interval_seconds", 3600))
-    cooldown_seconds = int(context.application.bot_data.get("watcher_cooldown_seconds", 86400))
     watch_state = db.get_watch_state()
     last_checked = watch_state.get("last_checked_at") or "not checked yet"
     last_signal = watch_state.get("last_signal") or "not available yet"
     last_confidence = watch_state.get("last_confidence") or "not available yet"
     last_price = watch_state.get("last_price") or "n/a"
+    last_prev_price = watch_state.get("last_prev_price") or "n/a"
+    last_delta = watch_state.get("last_delta") or "n/a"
+    last_delta_percent = watch_state.get("last_delta_percent") or "n/a"
+    last_rule_result = watch_state.get("last_rule_result") or "not available yet"
+    last_ema_fast = watch_state.get("last_ema_fast") or "n/a"
+    last_ema_slow = watch_state.get("last_ema_slow") or "n/a"
+    last_atr = watch_state.get("last_atr") or "n/a"
+    last_filter_pass = watch_state.get("last_filter_pass") or "n/a"
+    last_filter_reason = watch_state.get("last_filter_reason") or "n/a"
+    last_timeframes = watch_state.get("last_timeframes") or "n/a"
     last_sent = watch_state.get("last_sent_at") or "never"
     next_check = "not scheduled yet"
-    cooldown_remaining = "0s"
+    cooldown_remaining = "disabled"
 
     if watch_state.get("last_checked_at"):
         try:
@@ -216,19 +225,20 @@ async def watch_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         except Exception:
             next_check = "not scheduled yet"
 
-    if watch_state.get("last_sent_at"):
-        try:
-            sent_dt = datetime.fromisoformat(str(watch_state["last_sent_at"]))
-            remaining = sent_dt + timedelta(seconds=cooldown_seconds) - datetime.now(timezone.utc)
-            cooldown_remaining = "0s" if remaining.total_seconds() <= 0 else str(remaining).split(".")[0]
-        except Exception:
-            cooldown_remaining = "unknown"
-
     lines = [
         "Watcher status:",
         f"- Last checked: {last_checked}",
         f"- Last signal: {last_signal} ({last_confidence})",
         f"- Last price: {last_price}",
+        f"- Previous price: {last_prev_price}",
+        f"- Delta: {last_delta}",
+        f"- Delta %: {last_delta_percent}",
+        f"- Rule result: {last_rule_result}",
+        f"- EMA fast/slow: {last_ema_fast} / {last_ema_slow}",
+        f"- ATR %: {last_atr}",
+        f"- Filter pass: {last_filter_pass}",
+        f"- Filter reason: {last_filter_reason}",
+        f"- Timeframes: {last_timeframes}",
         f"- Last sent alert: {last_sent}",
         f"- Next check: {next_check}",
         f"- Cooldown remaining: {cooldown_remaining}",

@@ -15,7 +15,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = (
         "Welcome to Gold News Bot.\n"
         "Use /help to see commands.\n"
-        "Access to /news and /ask requires temporary permission from the bot owner."
+        "Access to signal features requires temporary permission from the bot owner."
     )
     await update.effective_message.reply_text(message)
 
@@ -26,9 +26,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start - Intro\n"
         "/help - This help\n"
         "/myid - Show your Telegram user ID\n"
-        "/news - Latest gold digest\n"
-        "/headline - Top 3 improved headlines\n"
-        "/ask <question> - Ask a custom market question\n\n"
+        "\n"
         "/addsite <url> [name] - Add your custom RSS/news site\n"
         "/removesite <url> - Remove your custom site\n"
         "/listsites - List your custom sites\n\n"
@@ -140,7 +138,7 @@ async def add_site(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
     db.add_custom_source(owner_user_id=user.id, source_url=source_url, source_name=source_name)
     db.add_audit_log(user.id, "add_site", f"url={source_url}")
-    await update.effective_message.reply_text("Custom source saved. It will be used in /news and /ask.")
+    await update.effective_message.reply_text("Custom source saved. It will be used in source monitoring.")
 
 
 async def remove_site(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

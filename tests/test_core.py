@@ -4,6 +4,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from src.bot import (
+    _atr,
+    _compute_delta,
+    _deterministic_signal_from_delta,
+    _ema,
     _extract_reason,
     _extract_signal_confidence,
     _is_weak_reason,
@@ -113,6 +117,16 @@ def test_watch_state_persistence(tmp_path: Path) -> None:
         confidence="High",
         price="4700.00",
         headlines_hash="news456",
+        prev_price="4720.00",
+        delta="-20.00",
+        delta_percent="-0.42",
+        rule_result="NO_SIGNAL",
+        ema_fast="4701.1200",
+        ema_slow="4705.3400",
+        atr="0.1100",
+        filter_pass="false",
+        filter_reason="ema_trend_mismatch",
+        timeframe_summary="5m,15m",
     )
     state = db.get_watch_state()
     assert state["last_checked_at"] == "2026-01-01T01:00:00+00:00"
@@ -120,6 +134,16 @@ def test_watch_state_persistence(tmp_path: Path) -> None:
     assert state["last_confidence"] == "High"
     assert state["last_price"] == "4700.00"
     assert state["last_headlines_hash"] == "news456"
+    assert state["last_prev_price"] == "4720.00"
+    assert state["last_delta"] == "-20.00"
+    assert state["last_delta_percent"] == "-0.42"
+    assert state["last_rule_result"] == "NO_SIGNAL"
+    assert state["last_ema_fast"] == "4701.1200"
+    assert state["last_ema_slow"] == "4705.3400"
+    assert state["last_atr"] == "0.1100"
+    assert state["last_filter_pass"] == "false"
+    assert state["last_filter_reason"] == "ema_trend_mismatch"
+    assert state["last_timeframes"] == "5m,15m"
 
 
 def test_signal_trigger_policy() -> None:
@@ -154,3 +178,56 @@ def test_price_move_threshold() -> None:
     assert _price_moved_enough("100", "101") is True
     assert _price_moved_enough("100", "100.7") is False
     assert _price_moved_enough("n/a", "101") is False
+
+
+def test_compute_delta() -> None:
+    delta, delta_pct = _compute_delta(prev_price="100", current_price="101")
+    assert delta == 1.0
+    assert round(float(delta_pct), 2) == 1.0
+    bad_delta, bad_pct = _compute_delta(prev_price="n/a", current_price="101")
+    assert bad_delta is None
+    assert bad_pct is None
+
+
+def test_deterministic_signal_from_delta_thresholds() -> None:
+    rule, signal, confidence, _ = _deterministic_signal_from_delta(
+        delta_percent=0.12,
+        prev_price="100",
+        current_price="100.12",
+        previous_signal="BUY",
+        force_send=False,
+    )
+    assert rule == "BUY"
+    assert signal == "BUY"
+    assert confidence == "High"
+
+    rule, signal, confidence, _ = _deterministic_signal_from_delta(
+        delta_percent=-0.12,
+        prev_price="100",
+        current_price="99.88",
+        previous_signal="SELL",
+        force_send=False,
+    )
+    assert rule == "SELL"
+    assert signal == "SELL"
+    assert confidence == "Medium"
+
+    rule, signal, _, _ = _deterministic_signal_from_delta(
+        delta_percent=0.03,
+        prev_price="100",
+        current_price="100.03",
+        previous_signal="SELL",
+        force_send=False,
+    )
+    assert rule == "NO_SIGNAL"
+    assert signal == "SELL"
+
+
+def test_ema_and_atr_calculations() -> None:
+    close = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0]
+    high = [101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
+    low = [99.0, 100.0, 101.0, 102.0, 103.0, 104.0]
+    ema = _ema(close, 3)
+    atr = _atr(high, low, close, 3)
+    assert ema is not None and ema > 0
+    assert atr is not None and atr > 0

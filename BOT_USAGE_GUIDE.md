@@ -51,7 +51,7 @@ Use these commands only from the Telegram account configured as bot owner.
   Example: `/listchannels`
 
 - `/sendtest`  
-  Sends an immediate test broadcast (headline + news) to owner/users/channels.
+  Sends an immediate test signal broadcast to owner/users/channels.
   Example: `/sendtest`
 
 - `/watchstatus`  
@@ -65,18 +65,6 @@ Use these commands only from the Telegram account configured as bot owner.
 ## TEMPORARY USER Commands
 
 Use these after owner has granted access via `/adduser`.
-
-- `/headline`  
-  Returns a short gold market headline/summary.
-  Example: `/headline`
-
-- `/news`  
-  Returns gold market digest summary using window since last successful broadcast.
-  Example: `/news`
-
-- `/ask <question>`  
-  Asks a custom market question using the AI backend.
-  Example: `/ask Why is gold moving up today?`
 
 - `/addsite <url> [name]`  
   Adds a personal custom news source for your own digest.
@@ -97,14 +85,15 @@ Use these after owner has granted access via `/adduser`.
 
 ## Dynamic Signal Posting (Always-On)
 
-- Bot watcher runs every 1 hour in polling mode.
-- Auto-post rule:
-  - `BUY + High`, or
-  - `SELL + High`
-- Alert sends only when there is a material change:
-  - signal flipped, or
-  - price moved at least 1%, or
-  - top signal-news set changed
+- Bot watcher runs every 30 seconds in polling mode.
+- Contrarian auto-post rule:
+  - if price move from previous check is `>= +0.05%` -> `BUY`
+  - if price move from previous check is `<= -0.05%` -> `SELL`
+  - if move is within (-0.05%, +0.05%), no auto alert is sent
+- Confirmation filters are required before send:
+  - EMA fast/slow trend alignment on configured confirmation timeframes
+  - ATR% above minimum threshold
+  - structure check does not conflict with signal direction
+- If trigger side is valid but filters fail, the bot skips alert and records reasons in `/watchstatus`.
 - Normal cooldown is 24 hours unless the signal flips side.
-- If the AI returns a weak or empty `Reason`, the bot retries once and then skips the alert if it is still weak.
-- Auto signal sends only the signal message, not the separate headline message.
+- Reason text is deterministic and generated from price math variables.

@@ -16,6 +16,13 @@ class Settings:
     google_model: str
     openrouter_api_key: str
     openrouter_model: str
+    tradingview_symbol: str
+    tradingview_auth_token: str
+    signal_ema_fast: int
+    signal_ema_slow: int
+    signal_atr_period: int
+    signal_min_atr_pct: float
+    signal_confirm_timeframes: tuple[str, ...]
     default_timezone: str
     global_news_cron: str
     database_url: str
@@ -68,6 +75,15 @@ def load_settings() -> Settings:
         google_model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash-lite").strip(),
         openrouter_api_key=openrouter_key,
         openrouter_model=os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip(),
+        tradingview_symbol=os.getenv("TRADINGVIEW_SYMBOL", "TVC:GOLD").strip() or "TVC:GOLD",
+        tradingview_auth_token=os.getenv("TRADINGVIEW_AUTH_TOKEN", "").strip(),
+        signal_ema_fast=max(2, int(os.getenv("SIGNAL_EMA_FAST", "9").strip() or "9")),
+        signal_ema_slow=max(3, int(os.getenv("SIGNAL_EMA_SLOW", "21").strip() or "21")),
+        signal_atr_period=max(2, int(os.getenv("SIGNAL_ATR_PERIOD", "14").strip() or "14")),
+        signal_min_atr_pct=float(os.getenv("SIGNAL_MIN_ATR_PCT", "0.08").strip() or "0.08"),
+        signal_confirm_timeframes=tuple(
+            part.strip() for part in (os.getenv("SIGNAL_CONFIRM_TIMEFRAMES", "5m,15m").split(",")) if part.strip()
+        ),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", "UTC").strip(),
         global_news_cron=os.getenv("GLOBAL_NEWS_CRON", "0 9 * * *").strip(),
         database_url=os.getenv("DATABASE_URL", "sqlite:///data/bot.db").strip(),
