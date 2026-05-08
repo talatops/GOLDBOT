@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import random
 from datetime import datetime, timedelta, timezone
 
 from telegram import Update
@@ -80,7 +81,16 @@ def build_application() -> Application:
     app.bot_data["news_service"] = news_service
     app.bot_data["scheduler"] = scheduler
 
-    async def _broadcast_signal_message(signal: str, confidence: str, reason: str, price: dict[str, str]) -> int:
+    auto_signal_count = 0
+    bright_signal_target = random.randint(1, 10)
+
+    async def _broadcast_signal_message(
+        signal: str,
+        confidence: str,
+        reason: str,
+        price: dict[str, str],
+        bright_time: bool = False,
+    ) -> int:
         db.purge_expired_users()
         price_html = (
             f"<b>Live Price</b>\n"
@@ -89,12 +99,14 @@ def build_application() -> Application:
             f"Source: {price['source']}\n"
             f"<a href=\"https://www.tradingview.com/chart/?symbol=TVC%3AGOLD\">Open TradingView GOLD Chart</a>"
         )
+        bright_time_line = f"\n<b>Bright time</b>: {_decorate_signal(signal)}" if bright_time else ""
         final_message = (
             f"{price_html}\n\n"
             "<b>Trade Signal</b>\n"
             f"<b>Signal</b>: {_decorate_signal(signal)}\n"
             f"<b>Confidence</b>: {confidence}\n"
             f"<b>Reason</b>: {reason}"
+            f"{bright_time_line}"
         )
         recipients = set(settings.bot_owner_ids)
         recipients.update(user.telegram_user_id for user in db.list_authorized_users())
@@ -125,6 +137,7 @@ def build_application() -> Application:
     app.bot_data["watcher_interval_seconds"] = int(WATCH_INTERVAL.total_seconds())
 
     async def run_signal_watch_cycle(force_send: bool = False) -> dict[str, str | bool]:
+        nonlocal auto_signal_count, bright_signal_target
         price_snapshot = await news_service.get_live_price_snapshot()
         current_price = str(price_snapshot.get("price") or "n/a")
         watch_state = db.get_watch_state()
@@ -182,7 +195,20 @@ def build_application() -> Application:
         # Threshold-only mode: send every cycle.
         del alert_state
 
-        sent_count = await _broadcast_signal_message(signal=signal, confidence=confidence, reason=reason, price=price_snapshot)
+        bright_time = False
+        if not force_send:
+            auto_signal_count += 1
+            if auto_signal_count > bright_signal_target:
+                bright_time = True
+                auto_signal_count = 0
+                bright_signal_target = random.randint(1, 10)
+        sent_count = await _broadcast_signal_message(
+            signal=signal,
+            confidence=confidence,
+            reason=reason,
+            price=price_snapshot,
+            bright_time=bright_time,
+        )
         if sent_count:
             db.set_last_alert_state(
                 signal_hash=_build_alert_hash(f"{signal}|{confidence}|{reason}|{current_price}|{delta_pct}"),
